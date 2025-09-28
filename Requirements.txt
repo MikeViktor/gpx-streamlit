@@ -1,5 +1,5 @@
 streamlit>=1.32
 pandas>=2.0
 altair>=5.0
-reportlab>=4.0     # se disponibile, useremo questo
-fpdf2>=2.7         # fallback puro-Python: funziona ovunque
+reportlab>=4.0
+fpdf2>=2.7
