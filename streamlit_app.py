@@ -4,28 +4,37 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# ===================== PDF backends =====================
-# Prova ReportLab, altrimenti fallback FPDF2. Se nessuno dei due è presente,
-# mostreremo un messaggio informativo e non un errore.
+# ===================== PDF backend: forza FPDF2 con auto-install =====================
+import sys, subprocess
+
 PDF_BACKEND = None
-try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib import colors
-    from reportlab.pdfgen import canvas
-    PDF_BACKEND = "reportlab"
-except Exception:
+FPDF = None
+A4 = colors = canvas = None  # segnaposto, inutilizzati con fpdf2
+
+def _setup_pdf_backend():
+    global PDF_BACKEND, FPDF
     try:
-        from fpdf import FPDF
+        from fpdf import FPDF as _FPDF
+        FPDF = _FPDF
         PDF_BACKEND = "fpdf2"
+        return
+    except Exception:
+        pass
+    # installa fpdf2 al volo e riprova
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "fpdf2>=2.7", "-q"])
+        from fpdf import FPDF as _FPDF
+        FPDF = _FPDF
+        PDF_BACKEND = "fpdf2"
+        return
     except Exception:
         PDF_BACKEND = None
 
-def _safe(s: str) -> str:
-    return (s.replace("−","-").replace("•","-").replace("°"," deg")
-              .replace("≥",">=").replace("≤","<="))
+_setup_pdf_backend()
 
-APP_TITLE = "Tempo percorrenza sentiero (web)"
-APP_VER   = "v2.5"
+# (debug a schermo)
+import streamlit as st
+st.caption(f"PDF backend: {PDF_BACKEND or 'none'}")
 
 # ===== Filtri/ricampionamento =====
 RS_STEP_M     = 3.0
