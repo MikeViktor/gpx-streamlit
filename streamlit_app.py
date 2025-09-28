@@ -5,7 +5,7 @@ import streamlit as st
 import altair as alt
 
 APP_TITLE = "Tempo percorrenza sentiero (web)"
-APP_VER   = "v2.1 (top uploader + Calcola)"
+APP_VER   = "v2.2 (reset parametri su nuovo GPX)"
 
 # ===== Parametri profilo / filtri =====
 RS_STEP_M     = 3.0      # ricampionamento ogni 3 m
@@ -155,6 +155,23 @@ def cat_from_if(val: float) -> str:
     if val < 50: return "Medio"
     if val < 70: return "Impegnativo"
     return "Molto impegnativo"
+
+# -------------------------- DEFAULT e reset su nuovo file --------------------------
+DEFAULTS = {
+    "base": 15.0, "up": 15.0, "down": 15.0,
+    "weight": 70.0, "reverse": False,
+    "temp": 15.0, "hum": 50.0, "wind": 5.0,
+    "precip_sel": "assenza pioggia",
+    "surface_sel": "asciutto",
+    "expo_sel": "misto",
+    "tech_sel": "normale",
+    "loadkg": 6.0,
+}
+
+def ensure_defaults():
+    for k, v in DEFAULTS.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 # -------------------------- Core calcoli --------------------------
 def compute_from_gpx_bytes(file_bytes: bytes,
@@ -314,9 +331,7 @@ def compute_if_from_res(res: dict,
 
     IF_base = 100.0 * (1.0 - math.exp(-S / max(1e-6, IF_S0)))
 
-    M_precip = precip
-    M_surface = surface
-    M_meteo = meteo_multiplier(temp_c, humidity_pct, M_precip, M_surface, wind_kmh, exposure)
+    M_meteo = meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure)
     M_alt   = altitude_multiplier(res.get("avg_alt_m"))
     M_tech  = technique_multiplier(technique_level)
     M_load  = pack_load_multiplier(extra_load_kg)
@@ -334,37 +349,58 @@ def compute_if_from_res(res: dict,
 st.set_page_config(page_title=APP_TITLE, page_icon="🗺️", layout="wide")
 st.title(f"{APP_TITLE} — {APP_VER}")
 
+# Inizializza default una volta
+ensure_defaults()
+
 # ======== Barra superiore: Carica GPX + Calcola ========
 top = st.container()
 with top:
     c1, c2, c3 = st.columns([4, 1.2, 1])
     gpx = c1.file_uploader("Carica GPX", type=["gpx"], key="gpx_file")
     recalc = c2.button("Calcola", use_container_width=True)
+
+    # Se è stato caricato un nuovo file, resetta TUTTI i parametri ai default
+    file_bytes = None
+    if gpx is not None:
+        file_bytes = gpx.getvalue()
+        sig = f"{gpx.name}|{len(file_bytes)}"
+        if st.session_state.get("last_gpx_sig") != sig:
+            st.session_state["last_gpx_sig"] = sig
+            for k, v in DEFAULTS.items():
+                st.session_state[k] = v
+            # opzionale: st.rerun() per forzare il refresh immediato
+
     if gpx is not None:
         c3.caption(f"Selezionato: {gpx.name}")
 
-# ======== Sidebar: parametri e condizioni ========
+# ======== Sidebar: parametri e condizioni (con chiavi) ========
 with st.sidebar:
     st.header("Impostazioni")
-    base = st.number_input("Min/km (piano)",  min_value=1.0, value=15.0, step=0.5)
-    up   = st.number_input("Min/100 m (salita)", min_value=1.0, value=15.0, step=0.5)
-    down = st.number_input("Min/200 m (discesa)",min_value=1.0, value=15.0, step=0.5)
-    weight = st.number_input("Peso (kg)", min_value=30.0, value=70.0, step=1.0)
-    reverse = st.checkbox("Inverti traccia", value=False)
+    base    = st.number_input("Min/km (piano)",   min_value=1.0, step=0.5, key="base")
+    up      = st.number_input("Min/100 m (salita)", min_value=1.0, step=0.5, key="up")
+    down    = st.number_input("Min/200 m (discesa)",min_value=1.0, step=0.5, key="down")
+    weight  = st.number_input("Peso (kg)", min_value=30.0, step=1.0, key="weight")
+    reverse = st.checkbox("Inverti traccia", key="reverse")
 
     st.markdown("---")
     st.subheader("Condizioni")
-    temp = st.number_input("Temperatura (°C)", value=15.0, step=1.0)
-    hum  = st.number_input("Umidità (%)", value=50.0, step=1.0, min_value=0.0, max_value=100.0)
-    wind = st.number_input("Vento (km/h)", value=5.0, step=1.0, min_value=0.0)
+    temp  = st.number_input("Temperatura (°C)", step=1.0, key="temp")
+    hum   = st.number_input("Umidità (%)", step=1.0, min_value=0.0, max_value=100.0, key="hum")
+    wind  = st.number_input("Vento (km/h)", step=1.0, min_value=0.0, key="wind")
 
     precip_it = st.selectbox("Precipitazioni",
-        ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"], index=0)
+        ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"],
+        key="precip_sel")
     surface_it = st.selectbox("Fondo",
-        ["asciutto","fango","roccia bagnata","neve dura","ghiaccio"], index=0)
-    expo_it = st.selectbox("Esposizione", ["ombra","misto","pieno sole"], index=1)
-    tech_it = st.selectbox("Tecnica", ["facile","normale","roccioso","scrambling","neve/ghiaccio"], index=1)
-    loadkg  = st.number_input("Zaino extra (kg)", value=6.0, step=1.0, min_value=0.0)
+        ["asciutto","fango","roccia bagnata","neve dura","ghiaccio"],
+        key="surface_sel")
+    expo_it = st.selectbox("Esposizione",
+        ["ombra","misto","pieno sole"],
+        key="expo_sel")
+    tech_it = st.selectbox("Tecnica",
+        ["facile","normale","roccioso","scrambling","neve/ghiaccio"],
+        key="tech_sel")
+    loadkg = st.number_input("Zaino extra (kg)", step=1.0, min_value=0.0, key="loadkg")
 
 # mappe IT -> codici interni
 PRECIP_MAP = {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
@@ -377,8 +413,7 @@ if not gpx:
     st.info("Carica un file GPX per iniziare.")
 else:
     try:
-        file_bytes = gpx.read()
-        # Nota: il bottone "Calcola" force-rerun; il calcolo avviene comunque su ogni modifica.
+        # Usa i bytes già letti sopra (non usare .read() più volte)
         res = compute_from_gpx_bytes(file_bytes, base, up, down, weight, reverse=reverse)
     except Exception as e:
         st.error(str(e))
@@ -408,7 +443,7 @@ else:
             c8.markdown(f"**Pend. media discesa:** {res['grade_down_pct']:.1f} %")
             c9.markdown(f"**Calorie stimate:** {res['cal_total']} kcal")
 
-            # fasce pendenza (metri) — testo semplice
+            # fasce pendenza (metri)
             ab = [int(round(x)) for x in res["asc_bins_m"]]
             db = [int(round(x)) for x in res["desc_bins_m"]]
             st.markdown("**Fasce pendenza (metri)**")
@@ -439,9 +474,9 @@ else:
 
         with colR:
             st.subheader("Indice di Fatica")
-            precip = PRECIP_MAP.get(precip_it, "dry")
-            surface= SURF_MAP.get(surface_it, "dry")
-            exposure = EXPO_MAP.get(expo_it, "mixed")
+            precip  = PRECIP_MAP.get(precip_it, "dry")
+            surface = SURF_MAP.get(surface_it, "dry")
+            exposure= EXPO_MAP.get(expo_it, "mixed")
             fi = compute_if_from_res(
                 res,
                 temp_c=float(temp), humidity_pct=float(hum),
@@ -452,7 +487,3 @@ else:
             st.metric("Indice di Fatica", f"{fi['IF']}  ({fi['cat']})")
             st.caption(f"IF base: {fi['IF_base']}  ·  Meteo: {fi['M_meteo']}  ·  Alt: {fi['M_alt']}  ·  Tec: {fi['M_tech']}  ·  Zaino: {fi['M_load']}")
             st.caption(f"LCS≥25: {res['lcs25_m']} m · Blocchi≥25: {res['blocks25_count']} · Surge: {res['surge_idx_per_km']}/km")
-
-            # Download CSV profilo
-            csv = res["df_profile"].to_csv(index=False).encode("utf-8")
-            st.download_button("Scarica profilo (CSV)", csv, file_name="profilo_gpx.csv", mime="text/csv")
