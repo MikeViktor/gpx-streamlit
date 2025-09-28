@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
-import io, math, xml.etree.ElementTree as ET
+import math, xml.etree.ElementTree as ET
 import pandas as pd
 import streamlit as st
 import altair as alt
 
 APP_TITLE = "Tempo percorrenza sentiero (web)"
-APP_VER   = "v2.0"
+APP_VER   = "v2.0 pulita"
 
-# ===== Parametri profilo / filtri (coerenti con l’app desktop) =====
+# ===== Parametri profilo / filtri =====
 RS_STEP_M     = 3.0      # ricampionamento ogni 3 m
-RS_MIN_DELEV  = 0.25     # deadband per contare D+/D-
+RS_MIN_DELEV  = 0.25     # deadband per D+/D-
 RS_MED_K      = 3        # finestra mediana
 RS_AVG_K      = 3        # finestra media mobile
 ABS_JUMP_RAW  = 100.0    # buco grezzo tra 2 punti grezzi
 
-# ===== Pesi Indice di Fatica (stessa logica desktop) =====
+# ===== Pesi Indice di Fatica =====
 W_D      = 0.5
 W_PLUS   = 1.0
 W_COMP   = 0.5
@@ -115,15 +115,9 @@ def meteo_multiplier(temp_c: float, humidity_pct: float, precip: str, surface: s
     if   humidity_pct > 80: M_temp += 0.10
     elif humidity_pct > 60: M_temp += 0.05
 
-    precip_map = {
-        "dry": 1.00, "drizzle": 1.05, "rain": 1.15, "heavy_rain": 1.30,
-        "snow_shallow": 1.25, "snow_deep": 1.60
-    }
-    surface_map = {
-        "dry": 1.00, "mud": 1.10, "wet_rock": 1.15,
-        "hard_snow": 1.30, "ice": 1.60
-    }
-    exposure_map = {"shade": 1.00, "mixed": 1.05, "sun": 1.10}
+    precip_map = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}
+    surface_map = {"dry":1.00,"mud":1.10,"wet_rock":1.15,"hard_snow":1.30,"ice":1.60}
+    exposure_map = {"shade":1.00,"mixed":1.05,"sun":1.10}
 
     M_precip  = precip_map.get(precip, 1.00)
     M_surface = surface_map.get(surface, 1.00)
@@ -190,7 +184,7 @@ def compute_from_gpx_bytes(file_bytes: bytes,
     asc_len = desc_len = flat_len = 0.0
     asc_gain = desc_drop = 0.0
 
-    # fasce pendenza salita/discesa (metri): <10, 10–20, 20–30, 30–40, >40
+    # fasce pendenza (metri): <10, 10–20, 20–30, 30–40, >40
     asc_bins = [0.0, 0.0, 0.0, 0.0, 0.0]
     desc_bins= [0.0, 0.0, 0.0, 0.0, 0.0]
 
@@ -258,7 +252,7 @@ def compute_from_gpx_bytes(file_bytes: bytes,
 
     holes = sum(1 for i in range(1, len(ele_raw)) if abs(ele_raw[i] - ele_raw[i-1]) >= ABS_JUMP_RAW)
 
-    # calorie (stessa stima desktop)
+    # calorie
     weight_kg = max(1.0, float(weight_kg))
     cal_flat = weight_kg * 0.6  * max(0.0, tot_km)
     cal_up   = weight_kg * 0.006* max(0.0, dplus)
@@ -267,10 +261,7 @@ def compute_from_gpx_bytes(file_bytes: bytes,
 
     surge_per_km = (surge_transitions / max(0.001, tot_km))
 
-    df = pd.DataFrame({
-        "km":[c/1000.0 for c in cum],
-        "elev_m": ele_raw
-    })
+    df = pd.DataFrame({"km":[c/1000.0 for c in cum], "elev_m": ele_raw})
 
     return {
         "tot_km": round(tot_km, 2),
@@ -323,7 +314,9 @@ def compute_if_from_res(res: dict,
 
     IF_base = 100.0 * (1.0 - math.exp(-S / max(1e-6, IF_S0)))
 
-    M_meteo = meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure)
+    M_precip = precip
+    M_surface = surface
+    M_meteo = meteo_multiplier(temp_c, humidity_pct, M_precip, M_surface, wind_kmh, exposure)
     M_alt   = altitude_multiplier(res.get("avg_alt_m"))
     M_tech  = technique_multiplier(technique_level)
     M_load  = pack_load_multiplier(extra_load_kg)
@@ -367,12 +360,9 @@ with st.sidebar:
     gpx = st.file_uploader("Carica GPX", type=["gpx"])
 
 # mappe IT -> codici interni
-PRECIP_MAP = {
-    "assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain",
-    "neve fresca":"snow_shallow","neve profonda":"snow_deep"
-}
-SURF_MAP = {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
-EXPO_MAP = {"ombra":"shade","misto":"mixed","pieno sole":"sun"}
+PRECIP_MAP = {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
+SURF_MAP   = {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
+EXPO_MAP   = {"ombra":"shade","misto":"mixed","pieno sole":"sun"}
 
 colL, colR = st.columns([1.15, 1])
 
@@ -393,32 +383,34 @@ else:
             m4.metric("Tempo totale", fmt_hm(res["t_total"]))
 
             c1, c2, c3 = st.columns(3)
-            c1.write(f"**Tempo piano:** {fmt_hm(res['t_dist'])}")
-            c2.write(f"**Tempo salita:** {fmt_hm(res['t_up'])}")
-            c3.write(f"**Tempo discesa:** {fmt_hm(res['t_down'])}")
+            c1.markdown(f"**Tempo piano:** {fmt_hm(res['t_dist'])}")
+            c2.markdown(f"**Tempo salita:** {fmt_hm(res['t_up'])}")
+            c3.markdown(f"**Tempo discesa:** {fmt_hm(res['t_down'])}")
 
             holes = int(res['holes'])
-            st.warning(f"**Buchi GPX:** {holes}") if holes>0 else st.success("**Buchi GPX: 0**")
+            st.markdown("**Buchi GPX:** <span style='color:{}'>{}</span>".format("red" if holes>0 else "#0b0", holes), unsafe_allow_html=True)
 
             c4, c5, c6 = st.columns(3)
-            c4.write(f"**Piano:** {res['len_flat_km']:.2f} km")
-            c5.write(f"**Salita:** {res['len_up_km']:.2f} km")
-            c6.write(f"**Discesa:** {res['len_down_km']:.2f} km")
+            c4.markdown(f"**Piano:** {res['len_flat_km']:.2f} km")
+            c5.markdown(f"**Salita:** {res['len_up_km']:.2f} km")
+            c6.markdown(f"**Discesa:** {res['len_down_km']:.2f} km")
 
             c7, c8, c9 = st.columns(3)
-            c7.write(f"**Pend. media salita:** {res['grade_up_pct']:.1f} %")
-            c8.write(f"**Pend. media discesa:** {res['grade_down_pct']:.1f} %")
-            c9.write(f"**Calorie stimate:** {res['cal_total']} kcal")
+            c7.markdown(f"**Pend. media salita:** {res['grade_up_pct']:.1f} %")
+            c8.markdown(f"**Pend. media discesa:** {res['grade_down_pct']:.1f} %")
+            c9.markdown(f"**Calorie stimate:** {res['cal_total']} kcal")
 
-            # fasce pendenza (metri)
+            # fasce pendenza (metri) — testo semplice, niente st.write dict
             ab = [int(round(x)) for x in res["asc_bins_m"]]
             db = [int(round(x)) for x in res["desc_bins_m"]]
             st.markdown("**Fasce pendenza (metri)**")
-            st.write(
-                f"**Salita:** <10%: {ab[0]} m · 10–20%: {ab[1]} m · 20–30%: {ab[2]} m · 30–40%: {ab[3]} m · >40%: {ab[4]} m"
+            st.markdown(
+                f"**Salita:** &lt;10%: {ab[0]} m · 10–20%: {ab[1]} m · 20–30%: {ab[2]} m · 30–40%: {ab[3]} m · &gt;40%: {ab[4]} m",
+                unsafe_allow_html=True
             )
-            st.write(
-                f"**Discesa:** <10%: {db[0]} m · 10–20%: {db[1]} m · 20–30%: {db[2]} m · 30–40%: {db[3]} m · >40%: {db[4]} m"
+            st.markdown(
+                f"**Discesa:** &lt;10%: {db[0]} m · 10–20%: {db[1]} m · 20–30%: {db[2]} m · 30–40%: {db[3]} m · &gt;40%: {db[4]} m",
+                unsafe_allow_html=True
             )
 
             # Profilo altimetrico (Altair)
@@ -454,5 +446,5 @@ else:
             st.caption(f"LCS≥25: {res['lcs25_m']} m · Blocchi≥25: {res['blocks25_count']} · Surge: {res['surge_idx_per_km']}/km")
 
             # Download CSV profilo
-            csv = dfp.to_csv(index=False).encode("utf-8")
+            csv = res["df_profile"].to_csv(index=False).encode("utf-8")
             st.download_button("Scarica profilo (CSV)", csv, file_name="profilo_gpx.csv", mime="text/csv")
