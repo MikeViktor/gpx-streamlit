@@ -5,7 +5,7 @@ import streamlit as st
 import altair as alt
 
 APP_TITLE = "Tempo percorrenza sentiero (web)"
-APP_VER   = "v2.0 pulita"
+APP_VER   = "v2.1 (top uploader + Calcola)"
 
 # ===== Parametri profilo / filtri =====
 RS_STEP_M     = 3.0      # ricampionamento ogni 3 m
@@ -334,6 +334,16 @@ def compute_if_from_res(res: dict,
 st.set_page_config(page_title=APP_TITLE, page_icon="🗺️", layout="wide")
 st.title(f"{APP_TITLE} — {APP_VER}")
 
+# ======== Barra superiore: Carica GPX + Calcola ========
+top = st.container()
+with top:
+    c1, c2, c3 = st.columns([4, 1.2, 1])
+    gpx = c1.file_uploader("Carica GPX", type=["gpx"], key="gpx_file")
+    recalc = c2.button("Calcola", use_container_width=True)
+    if gpx is not None:
+        c3.caption(f"Selezionato: {gpx.name}")
+
+# ======== Sidebar: parametri e condizioni ========
 with st.sidebar:
     st.header("Impostazioni")
     base = st.number_input("Min/km (piano)",  min_value=1.0, value=15.0, step=0.5)
@@ -356,9 +366,6 @@ with st.sidebar:
     tech_it = st.selectbox("Tecnica", ["facile","normale","roccioso","scrambling","neve/ghiaccio"], index=1)
     loadkg  = st.number_input("Zaino extra (kg)", value=6.0, step=1.0, min_value=0.0)
 
-    st.markdown("---")
-    gpx = st.file_uploader("Carica GPX", type=["gpx"])
-
 # mappe IT -> codici interni
 PRECIP_MAP = {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
 SURF_MAP   = {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
@@ -371,6 +378,7 @@ if not gpx:
 else:
     try:
         file_bytes = gpx.read()
+        # Nota: il bottone "Calcola" force-rerun; il calcolo avviene comunque su ogni modifica.
         res = compute_from_gpx_bytes(file_bytes, base, up, down, weight, reverse=reverse)
     except Exception as e:
         st.error(str(e))
@@ -400,7 +408,7 @@ else:
             c8.markdown(f"**Pend. media discesa:** {res['grade_down_pct']:.1f} %")
             c9.markdown(f"**Calorie stimate:** {res['cal_total']} kcal")
 
-            # fasce pendenza (metri) — testo semplice, niente st.write dict
+            # fasce pendenza (metri) — testo semplice
             ab = [int(round(x)) for x in res["asc_bins_m"]]
             db = [int(round(x)) for x in res["desc_bins_m"]]
             st.markdown("**Fasce pendenza (metri)**")
