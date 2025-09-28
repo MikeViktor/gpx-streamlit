@@ -4,13 +4,17 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# --- PDF ---
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.pdfgen import canvas
+# ---- PDF (opzionale) ----
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.pdfgen import canvas
+    REPORTLAB_OK = True
+except Exception:
+    REPORTLAB_OK = False
 
 APP_TITLE = "Tempo percorrenza sentiero (web)"
-APP_VER   = "v2.3 (PDF A4)"
+APP_VER   = "v2.3 (PDF A4 opzionale)"
 
 # ===== Parametri profilo / filtri =====
 RS_STEP_M     = 3.0      # ricampionamento ogni 3 m
@@ -351,139 +355,129 @@ def compute_if_from_res(res: dict,
 
 # -------------------------- PDF export --------------------------
 def _safe(s: str) -> str:
-    # Evita simboli che i font base di ReportLab non renderizzano bene
     return (s.replace("−","-")
              .replace("•","-")
              .replace("°"," deg")
              .replace("≥",">=")
              .replace("≤","<="))
 
-def build_pdf(res: dict, fi: dict, params: dict, conds: dict, gpx_name: str) -> bytes:
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    W, H = A4
-    M = 36  # margine 0.5"
-    x = M; y = H - M
+if REPORTLAB_OK:
+    def build_pdf(res: dict, fi: dict, params: dict, conds: dict, gpx_name: str) -> bytes:
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=A4)
+        W, H = A4
+        M = 36
+        x = M; y = H - M
 
-    # Titolo
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(x, y, _safe(f"{APP_TITLE} — Export PDF"))
-    c.setFont("Helvetica", 10)
-    c.drawString(x, y-14, _safe(f"Versione {APP_VER} — File: {gpx_name or 'GPX'}"))
-    y -= 28
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(x, y, _safe(f"{APP_TITLE} — Export PDF"))
+        c.setFont("Helvetica", 10)
+        c.drawString(x, y-14, _safe(f"Versione {APP_VER} — File: {gpx_name or 'GPX'}"))
+        y -= 28
 
-    # Colonne dati principali
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(x, y, "Risultati principali")
-    y -= 14
-    c.setFont("Helvetica", 10)
-    lines = [
-        f"Distanza: {res['tot_km']} km",
-        f"Dislivello +: {int(res['dplus'])} m   Dislivello -: {int(res['dneg'])} m",
-        f"Tempo totale: {fmt_hm(res['t_total'])}",
-        f"  • Piano: {fmt_hm(res['t_dist'])}   • Salita: {fmt_hm(res['t_up'])}   • Discesa: {fmt_hm(res['t_down'])}",
-        f"Calorie stimate: {res['cal_total']} kcal",
-        f"Buchi GPX: {int(res['holes'])}",
-        f"Lunghezze — Piano: {res['len_flat_km']:.2f} km, Salita: {res['len_up_km']:.2f} km, Discesa: {res['len_down_km']:.2f} km",
-        f"Pend. media — Salita: {res['grade_up_pct']:.1f} %, Discesa: {res['grade_down_pct']:.1f} %",
-    ]
-    for L in lines:
-        c.drawString(x, y, _safe(L)); y -= 12
+        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Risultati principali")
+        y -= 14; c.setFont("Helvetica", 10)
+        lines = [
+            f"Distanza: {res['tot_km']} km",
+            f"Dislivello +: {int(res['dplus'])} m   Dislivello -: {int(res['dneg'])} m",
+            f"Tempo totale: {fmt_hm(res['t_total'])}",
+            f"  • Piano: {fmt_hm(res['t_dist'])}   • Salita: {fmt_hm(res['t_up'])}   • Discesa: {fmt_hm(res['t_down'])}",
+            f"Calorie stimate: {res['cal_total']} kcal",
+            f"Buchi GPX: {int(res['holes'])}",
+            f"Lunghezze — Piano: {res['len_flat_km']:.2f} km, Salita: {res['len_up_km']:.2f} km, Discesa: {res['len_down_km']:.2f} km",
+            f"Pend. media — Salita: {res['grade_up_pct']:.1f} %, Discesa: {res['grade_down_pct']:.1f} %",
+        ]
+        for L in lines:
+            c.drawString(x, y, _safe(L)); y -= 12
 
-    # Fasce pendenza
-    ab = [int(round(v)) for v in res["asc_bins_m"]]
-    db = [int(round(v)) for v in res["desc_bins_m"]]
-    y -= 4
-    c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Fasce di pendenza (metri)")
-    y -= 14; c.setFont("Helvetica", 10)
-    c.drawString(x, y, _safe(f"Salita: <10% {ab[0]} m — 10–20% {ab[1]} m — 20–30% {ab[2]} m — 30–40% {ab[3]} m — >40% {ab[4]} m")); y -= 12
-    c.drawString(x, y, _safe(f"Discesa: <10% {db[0]} m — 10–20% {db[1]} m — 20–30% {db[2]} m — 30–40% {db[3]} m — >40% {db[4]} m")); y -= 18
+        ab = [int(round(v)) for v in res["asc_bins_m"]]
+        db = [int(round(v)) for v in res["desc_bins_m"]]
+        y -= 4
+        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Fasce di pendenza (metri)")
+        y -= 14; c.setFont("Helvetica", 10)
+        c.drawString(x, y, _safe(f"Salita: <10% {ab[0]} m — 10–20% {ab[1]} m — 20–30% {ab[2]} m — 30–40% {ab[3]} m — >40% {ab[4]} m")); y -= 12
+        c.drawString(x, y, _safe(f"Discesa: <10% {db[0]} m — 10–20% {db[1]} m — 20–30% {db[2]} m — 30–40% {db[3]} m — >40% {db[4]} m")); y -= 18
 
-    # Indice di fatica
-    c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Indice di fatica")
-    y -= 14; c.setFont("Helvetica", 10)
-    c.drawString(x, y, _safe(f"IF: {fi['IF']} ({fi['cat']}) — IF base: {fi['IF_base']}"))
-    y -= 12
-    c.drawString(x, y, _safe(f"Meteo: {fi['M_meteo']}  • Alt: {fi['M_alt']}  • Tec: {fi['M_tech']}  • Zaino: {fi['M_load']}"))
-    y -= 18
+        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Indice di fatica")
+        y -= 14; c.setFont("Helvetica", 10)
+        c.drawString(x, y, _safe(f"IF: {fi['IF']} ({fi['cat']}) — IF base: {fi['IF_base']}"))
+        y -= 12
+        c.drawString(x, y, _safe(f"Meteo: {fi['M_meteo']}  • Alt: {fi['M_alt']}  • Tec: {fi['M_tech']}  • Zaino: {fi['M_load']}"))
+        y -= 18
 
-    # Parametri e condizioni
-    c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Parametri e condizioni")
-    y -= 14; c.setFont("Helvetica", 10)
-    p1 = f"Min/km (piano): {params['base']} — Min/100m salita: {params['up']} — Min/200m discesa: {params['down']} — Peso: {params['weight']} kg"
-    p2 = f"Inverti traccia: {'sì' if params['reverse'] else 'no'} — Zaino: {conds['loadkg']} kg — Tecnica: {conds['tech_it']}"
-    p3 = f"Met: T={conds['temp']} °C  U={conds['hum']} %  Vento={conds['wind']} km/h — Prec: {conds['precip_it']} — Fondo: {conds['surface_it']} — Esposizione: {conds['expo_it']}"
-    for L in (p1, p2, p3):
-        c.drawString(x, y, _safe(L)); y -= 12
+        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Parametri e condizioni")
+        y -= 14; c.setFont("Helvetica", 10)
+        p1 = f"Min/km (piano): {params['base']} — Min/100m salita: {params['up']} — Min/200m discesa: {params['down']} — Peso: {params['weight']} kg"
+        p2 = f"Inverti traccia: {'sì' if params['reverse'] else 'no'} — Zaino: {conds['loadkg']} kg — Tecnica: {conds['tech_it']}"
+        p3 = f"Met: T={conds['temp']} °C  U={conds['hum']} %  Vento={conds['wind']} km/h — Prec: {conds['precip_it']} — Fondo: {conds['surface_it']} — Esposizione: {conds['expo_it']}"
+        for L in (p1, p2, p3):
+            c.drawString(x, y, _safe(L)); y -= 12
 
-    # Profilo altimetrico (semplice)
-    y -= 12
-    c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Profilo altimetrico")
-    y -= 6
-    chart_h = 200
-    chart_w = A4[0] - 2*M
-    box_y = y - chart_h
-    c.setStrokeColor(colors.black)
-    c.rect(x, box_y, chart_w, chart_h, stroke=1, fill=0)
+        # Profilo altimetrico
+        y -= 12
+        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Profilo altimetrico")
+        y -= 6
+        chart_h = 200
+        chart_w = A4[0] - 2*M
+        box_y = y - chart_h
+        c.setStrokeColor(colors.black)
+        c.rect(x, box_y, chart_w, chart_h, stroke=1, fill=0)
 
-    df = res["df_profile"]
-    if len(df) >= 2:
-        # riduzione punti per non appesantire
-        max_pts = int(chart_w)  # ~ 1 pt per x
-        if len(df) > max_pts:
-            step = max(1, len(df) // max_pts)
-            dfp = df.iloc[::step]
-        else:
-            dfp = df
+        df = res["df_profile"]
+        if len(df) >= 2:
+            max_pts = int(chart_w)
+            if len(df) > max_pts:
+                step = max(1, len(df) // max_pts)
+                dfp = df.iloc[::step]
+            else:
+                dfp = df
 
-        xs = dfp["km"].to_list()
-        ys = dfp["elev_m"].to_list()
-        y_min, y_max = min(ys), max(ys)
-        if y_max - y_min < 1: y_max = y_min + 1
+            xs = dfp["km"].to_list()
+            ys = dfp["elev_m"].to_list()
+            y_min, y_max = min(ys), max(ys)
+            if y_max - y_min < 1: y_max = y_min + 1
 
-        x0 = xs[0]; x1 = xs[-1]
-        if x1 - x0 < 1e-6: x1 = x0 + 1e-6
+            x0 = xs[0]; x1 = xs[-1]
+            if x1 - x0 < 1e-6: x1 = x0 + 1e-6
 
-        def X(u): return x + ( (u - x0) / (x1 - x0) ) * chart_w
-        def Y(v): return box_y + ( (v - y_min) / (y_max - y_min) ) * chart_h
+            def X(u): return x + ( (u - x0) / (x1 - x0) ) * chart_w
+            def Y(v): return box_y + ( (v - y_min) / (y_max - y_min) ) * chart_h
 
-        # griglia verticale ogni 1 km
-        km0 = int(math.floor(x0))
-        km1 = int(math.ceil(x1))
-        c.setStrokeColor(colors.lightgrey)
-        for k in range(km0, km1+1):
-            gx = X(k)
-            c.line(gx, box_y, gx, box_y+chart_h)
-        # traccia
-        c.setStrokeColor(colors.darkblue)
-        c.setLineWidth(1)
-        px, py = X(xs[0]), Y(ys[0])
-        for u, v in zip(xs[1:], ys[1:]):
-            nx, ny = X(u), Y(v)
-            c.line(px, py, nx, ny)
-            px, py = nx, ny
+            # griglia verticale ogni 1 km
+            km0 = int(math.floor(x0))
+            km1 = int(math.ceil(x1))
+            c.setStrokeColor(colors.lightgrey)
+            for k in range(km0, km1+1):
+                gx = X(k)
+                c.line(gx, box_y, gx, box_y+chart_h)
 
-        # assi
-        c.setStrokeColor(colors.black); c.setLineWidth(0.5)
-        c.line(x, box_y, x+chart_w, box_y)           # x-axis
-        c.line(x, box_y, x, box_y+chart_h)           # y-axis
-        c.setFont("Helvetica", 9)
-        c.drawString(x, box_y-12, _safe(f"Distanza (km)"))
-        c.drawString(x-4, box_y+chart_h+4, _safe(f"Quota (m)  [{int(y_min)}–{int(y_max)}]"))
+            # traccia
+            c.setStrokeColor(colors.darkblue); c.setLineWidth(1)
+            px, py = X(xs[0]), Y(ys[0])
+            for u, v in zip(xs[1:], ys[1:]):
+                nx, ny = X(u), Y(v)
+                c.line(px, py, nx, ny)
+                px, py = nx, ny
 
-    # chiudi pagina
-    c.showPage()
-    c.save()
-    return buf.getvalue()
+            # assi
+            c.setStrokeColor(colors.black); c.setLineWidth(0.5)
+            c.line(x, box_y, x+chart_w, box_y)
+            c.line(x, box_y, x, box_y+chart_h)
+            c.setFont("Helvetica", 9)
+            c.drawString(x, box_y-12, "Distanza (km)")
+            c.drawString(x-4, box_y+chart_h+4, f"Quota (m)  [{int(y_min)}–{int(y_max)}]")
+
+        c.showPage(); c.save()
+        return buf.getvalue()
+else:
+    def build_pdf(*args, **kwargs):
+        raise RuntimeError("ReportLab non disponibile.")
 
 # -------------------------- UI Streamlit --------------------------
 st.set_page_config(page_title=APP_TITLE, page_icon="🗺️", layout="wide")
 st.title(f"{APP_TITLE} — {APP_VER}")
 
-# Inizializza default una volta
-for k, v in DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+ensure_defaults()
 
 # ======== Barra superiore: Carica GPX + Calcola ========
 top = st.container()
@@ -507,7 +501,7 @@ with top:
     if gpx is not None:
         c3.caption(f"Selezionato: {gpx.name}")
 
-# ======== Sidebar: parametri e condizioni (con chiavi) ========
+# ======== Sidebar: parametri e condizioni ========
 with st.sidebar:
     st.header("Impostazioni")
     base    = st.number_input("Min/km (piano)",   min_value=1.0, step=0.5, key="base")
@@ -605,7 +599,6 @@ else:
             )
             st.altair_chart(chart, use_container_width=True)
 
-            # --- SALVA PDF ---
             params = dict(base=base, up=up, down=down, weight=weight, reverse=reverse)
             conds  = dict(temp=temp, hum=hum, wind=wind,
                           precip_it=precip_it, surface_it=surface_it, expo_it=expo_it,
@@ -631,7 +624,11 @@ else:
             csv = res["df_profile"].to_csv(index=False).encode("utf-8")
             st.download_button("Scarica profilo (CSV)", csv, file_name="profilo_gpx.csv", mime="text/csv")
 
-            # Download PDF
-            pdf_bytes = build_pdf(res, fi, params, conds, gpx_name or "percorso")
-            fname = (gpx_name.rsplit(".",1)[0] if gpx_name else "percorso") + "_report.pdf"
-            st.download_button("Salva (PDF A4)", data=pdf_bytes, file_name=fname, mime="application/pdf", use_container_width=True)
+            # Download PDF (solo se reportlab è installato)
+            if REPORTLAB_OK:
+                pdf_bytes = build_pdf(res, fi, params, conds, gpx_name or "percorso")
+                fname = (gpx_name.rsplit(".",1)[0] if gpx_name else "percorso") + "_report.pdf"
+                st.download_button("Salva (PDF A4)", data=pdf_bytes,
+                                   file_name=fname, mime="application/pdf", use_container_width=True)
+            else:
+                st.info("Per esportare in PDF installa il pacchetto **reportlab** (vedi requirements.txt).")
