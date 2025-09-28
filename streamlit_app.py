@@ -4,7 +4,9 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# ---------------- PDF backends: ReportLab preferito, FPDF2 fallback ----------------
+# ===================== PDF backends =====================
+# Prova ReportLab, altrimenti fallback FPDF2. Se nessuno dei due è presente,
+# mostreremo un messaggio informativo e non un errore.
 PDF_BACKEND = None
 try:
     from reportlab.lib.pagesizes import A4
@@ -23,14 +25,14 @@ def _safe(s: str) -> str:
               .replace("≥",">=").replace("≤","<="))
 
 APP_TITLE = "Tempo percorrenza sentiero (web)"
-APP_VER   = "v2.4 (PDF backend auto)"
+APP_VER   = "v2.5"
 
-# ===== Parametri profilo / filtri =====
-RS_STEP_M     = 3.0      # ricampionamento ogni 3 m
-RS_MIN_DELEV  = 0.25     # deadband per D+/D-
-RS_MED_K      = 3        # finestra mediana
-RS_AVG_K      = 3        # finestra media mobile
-ABS_JUMP_RAW  = 100.0    # buco grezzo tra 2 punti grezzi
+# ===== Filtri/ricampionamento =====
+RS_STEP_M     = 3.0
+RS_MIN_DELEV  = 0.25
+RS_MED_K      = 3
+RS_AVG_K      = 3
+ABS_JUMP_RAW  = 100.0
 
 # ===== Pesi Indice di Fatica =====
 W_D      = 0.5
@@ -121,7 +123,6 @@ def fmt_hm(minutes):
 # ---------------- Meteo & fattori ----------------
 def meteo_multiplier(temp_c: float, humidity_pct: float, precip: str, surface: str,
                      wind_kmh: float, exposure: str) -> float:
-    # Temperatura + umidità
     if   temp_c < -5: M_temp = 1.20
     elif temp_c < 0:  M_temp = 1.10
     elif temp_c < 5:  M_temp = 1.05
@@ -156,13 +157,7 @@ def altitude_multiplier(avg_alt_m):
     return 1.0 + 0.03 * excess
 
 def technique_multiplier(level: str = "normale") -> float:
-    table = {
-        "facile": 0.95,
-        "normale": 1.00,
-        "roccioso": 1.10,
-        "scrambling": 1.20,
-        "neve/ghiaccio": 1.30
-    }
+    table = {"facile":0.95,"normale":1.00,"roccioso":1.10,"scrambling":1.20,"neve/ghiaccio":1.30}
     return table.get(level, 1.0)
 
 def pack_load_multiplier(extra_load_kg: float = 0.0) -> float:
@@ -348,7 +343,15 @@ def compute_if_from_res(res: dict,
 
     IF_base = 100.0 * (1.0 - math.exp(-S / max(1e-6, IF_S0)))
 
-    M_meteo = meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure)
+    # Mappature IT -> codici
+    precip_map = {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
+    surf_map   = {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
+    expo_map   = {"ombra":"shade","misto":"mixed","pieno sole":"sun"}
+
+    M_meteo = meteo_multiplier(temp_c, humidity_pct,
+                               precip_map.get(precip, "dry"),
+                               surf_map.get(surface, "dry"),
+                               wind_kmh, expo_map.get(exposure, "mixed"))
     M_alt   = altitude_multiplier(res.get("avg_alt_m"))
     M_tech  = technique_multiplier(technique_level)
     M_load  = pack_load_multiplier(extra_load_kg)
@@ -362,7 +365,7 @@ def compute_if_from_res(res: dict,
             "M_tech": round(M_tech,2), "M_load": round(M_load,2),
             "cat": cat_from_if(round(IF,1))}
 
-# ---------------- Build PDF (usa backend selezionato) ----------------
+# ---------------- Build PDF (usa backend disponibile) ----------------
 def build_pdf(res: dict, fi: dict, params: dict, conds: dict, gpx_name: str) -> bytes:
     if PDF_BACKEND == "reportlab":
         buf = io.BytesIO()
@@ -423,8 +426,7 @@ def build_pdf(res: dict, fi: dict, params: dict, conds: dict, gpx_name: str) -> 
 
         df = res["df_profile"]
         if len(df) >= 2:
-            xs = df["km"].tolist()
-            ys = df["elev_m"].tolist()
+            xs = df["km"].tolist(); ys = df["elev_m"].tolist()
             y_min, y_max = min(ys), max(ys)
             if y_max - y_min < 1: y_max = y_min + 1
             x0, x1 = xs[0], xs[-1]
@@ -506,7 +508,7 @@ def build_pdf(res: dict, fi: dict, params: dict, conds: dict, gpx_name: str) -> 
             if x1 - x0 < 1e-6: x1 = x0 + 1e-6
             def X(u): return x + ((u - x0)/(x1 - x0))*chart_w
             def Y(v): return box_y + ((v - y_min)/(y_max - y_min))*chart_h
-            # griglia
+            # griglia km
             km0, km1 = int(math.floor(x0)), int(math.ceil(x1))
             for k in range(km0, km1+1):
                 gx = X(k); pdf.line(gx, box_y, gx, box_y+chart_h)
@@ -519,20 +521,19 @@ def build_pdf(res: dict, fi: dict, params: dict, conds: dict, gpx_name: str) -> 
 
     raise RuntimeError("Nessun backend PDF disponibile (reportlab/fpdf2).")
 
-# ---------------- UI Streamlit ----------------
+# ===================== UI Streamlit =====================
 st.set_page_config(page_title=APP_TITLE, page_icon="🗺️", layout="wide")
 st.title(f"{APP_TITLE} — {APP_VER}")
 
 ensure_defaults()
 
-# Barra superiore: Carica GPX + Calcola
+# Barra superiore
 top = st.container()
 with top:
     c1, c2, c3 = st.columns([4, 1.2, 1])
     gpx = c1.file_uploader("Carica GPX", type=["gpx"], key="gpx_file")
-    recalc = c2.button("Calcola", use_container_width=True)
+    _recalc = c2.button("Calcola", use_container_width=True)
 
-    # reset parametri ai default se file nuovo
     file_bytes = None
     gpx_name = None
     if gpx is not None:
@@ -541,13 +542,13 @@ with top:
         sig = f"{gpx.name}|{len(file_bytes)}"
         if st.session_state.get("last_gpx_sig") != sig:
             st.session_state["last_gpx_sig"] = sig
+            # reset parametri ai default
             for k, v in DEFAULTS.items():
                 st.session_state[k] = v
-
     if gpx is not None:
         c3.caption(f"Selezionato: {gpx.name}")
 
-# Sidebar: parametri e condizioni
+# Sidebar parametri
 with st.sidebar:
     st.header("Impostazioni")
     base    = st.number_input("Min/km (piano)",     min_value=1.0, step=0.5, key="base")
@@ -561,7 +562,6 @@ with st.sidebar:
     temp  = st.number_input("Temperatura (°C)", step=1.0, key="temp")
     hum   = st.number_input("Umidità (%)", step=1.0, min_value=0.0, max_value=100.0, key="hum")
     wind  = st.number_input("Vento (km/h)", step=1.0, min_value=0.0, key="wind")
-
     precip_it = st.selectbox("Precipitazioni",
         ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"],
         key="precip_sel")
@@ -575,11 +575,6 @@ with st.sidebar:
         ["facile","normale","roccioso","scrambling","neve/ghiaccio"],
         key="tech_sel")
     loadkg = st.number_input("Zaino extra (kg)", step=1.0, min_value=0.0, key="loadkg")
-
-# mappe IT -> codici interni
-PRECIP_MAP = {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
-SURF_MAP   = {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
-EXPO_MAP   = {"ombra":"shade","misto":"mixed","pieno sole":"sun"}
 
 colL, colR = st.columns([1.15, 1])
 
@@ -629,7 +624,7 @@ else:
                 unsafe_allow_html=True
             )
 
-            # Profilo altimetrico (Altair)
+            # Profilo altimetrico
             dfp = res["df_profile"]
             chart = (
                 alt.Chart(dfp)
@@ -652,14 +647,11 @@ else:
 
         with colR:
             st.subheader("Indice di Fatica")
-            precip  = PRECIP_MAP.get(precip_it, "dry")
-            surface = SURF_MAP.get(surface_it, "dry")
-            exposure= EXPO_MAP.get(expo_it, "mixed")
             fi = compute_if_from_res(
                 res,
                 temp_c=float(temp), humidity_pct=float(hum),
-                precip=precip, surface=surface,
-                wind_kmh=float(wind), exposure=exposure,
+                precip=precip_it, surface=surface_it,
+                wind_kmh=float(wind), exposure=expo_it,
                 technique_level=tech_it, extra_load_kg=float(loadkg)
             )
             st.metric("Indice di Fatica", f"{fi['IF']}  ({fi['cat']})")
@@ -677,4 +669,4 @@ else:
                 st.download_button("Salva (PDF A4)", data=pdf_bytes,
                                    file_name=fname, mime="application/pdf", use_container_width=True)
             else:
-                st.info("Per esportare in PDF installa **reportlab** oppure **fpdf2** (vedi requirements.txt).")
+                st.info("Per esportare in PDF installa **fpdf2** (consigliato) oppure **reportlab** (vedi requirements.txt).")
