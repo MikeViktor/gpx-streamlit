@@ -662,11 +662,5 @@ else:
             csv = res["df_profile"].to_csv(index=False).encode("utf-8")
             st.download_button("Scarica profilo (CSV)", csv, file_name="profilo_gpx.csv", mime="text/csv")
 
-            # Download PDF (usa backend disponibile)
-            if PDF_BACKEND is not None:
-                pdf_bytes = build_pdf(res, fi, params, conds, gpx_name or "percorso")
-                fname = (gpx_name.rsplit(".",1)[0] if gpx_name else "percorso") + "_report.pdf"
-                st.download_button("Salva (PDF A4)", data=pdf_bytes,
-                                   file_name=fname, mime="application/pdf", use_container_width=True)
-            else:
-                st.info("Per esportare in PDF installa **fpdf2** (consigliato) oppure **reportlab** (vedi requirements.txt).")
+            # Stampa / Salva come PDF tramite il browser
+st.caption("Suggerimento: per stampare o salvare come PDF usa il comando del browser (Ctrl+P / ⌘P).")
