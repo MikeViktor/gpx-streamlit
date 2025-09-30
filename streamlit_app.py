@@ -343,40 +343,61 @@ import altair as alt
 
 def draw_gauge_altair(score: float):
     """
-    Gauge semicircolare con Altair senza Matplotlib.
-    Usa i canali theta/theta2 (in gradi) per definire gli archi.
+    Gauge SEMICIRCOLARE con Altair, colori in ordine e lancetta.
+    Niente Matplotlib. Funziona su Streamlit Cloud.
     """
     score = float(np.clip(score, 0, 100))
 
-    # Segmenti e colori (come desktop)
+    # Segmenti e colori (come desktop): 0-30, 30-50, 50-70, 70-80, 80-90, 90-100
     seg = pd.DataFrame({
         "label": ["Facile", "Medio", "Impeg.", "Diffic.", "Molto diff.", "Estremo"],
         "value": [30, 20, 20, 10, 10, 10],
         "color": ["#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#8e44ad", "#111111"]
     })
 
-    # Calcolo start/end in GRADI per un semicerchio (0°..180°)
     total = seg["value"].sum()
     seg["frac"] = seg["value"] / total
     seg["cum"] = seg["frac"].cumsum()
+    # Semicerchio: 0° (sinistra) → 180° (destra)
     seg["startDeg"] = (seg["cum"] - seg["frac"]) * 180.0
     seg["endDeg"]   = seg["cum"] * 180.0
 
+    # Archi della scala (donut)
     arcs = (
         alt.Chart(seg)
         .mark_arc(innerRadius=60, outerRadius=100)
         .encode(
-            theta=alt.Theta("startDeg:Q", title=None),
+            theta=alt.Theta("startDeg:Q"),
             theta2=alt.Theta2("endDeg:Q"),
             color=alt.Color("label:N",
                             scale=alt.Scale(range=seg["color"].tolist()),
                             legend=None)
         )
-        .properties(height=220)
+        .properties(height=240)
     )
 
-    # Testo centrale: valore e categoria
-    def cat_from_if(v):
+    # LANCETTA: un arco sottilissimo dal centro verso il bordo
+    needle_deg = (score/100.0)*180.0
+    needle_df = pd.DataFrame({
+        "start":[max(0.0, needle_deg-0.7)],
+        "end":[min(180.0, needle_deg+0.7)]
+    })
+    needle = (
+        alt.Chart(needle_df)
+        .mark_arc(innerRadius=0, outerRadius=100, color="#000000")
+        .encode(theta="start:Q", theta2="end:Q")
+    )
+
+    # MASCHERA metà inferiore (per ottenere il semicerchio)
+    mask_df = pd.DataFrame({"start":[180.0], "end":[360.0]})
+    mask = (
+        alt.Chart(mask_df)
+        .mark_arc(innerRadius=0, outerRadius=110, color="#ffffff")  # colore = sfondo
+        .encode(theta="start:Q", theta2="end:Q")
+    )
+
+    # Testi centrali
+    def _cat(v):
         if v < 30: return "Facile"
         if v < 50: return "Medio"
         if v < 70: return "Impegnativo"
@@ -384,17 +405,24 @@ def draw_gauge_altair(score: float):
         if v <= 90: return "Molto diff."
         return "Estremo"
 
-    lab = cat_from_if(score)
+    lab = _cat(score)
 
     center_val = alt.Chart(pd.DataFrame({"t":[f"{score:.1f}"]})).mark_text(
-        font="Segoe UI", fontSize=22, fontWeight="bold", dy=-10
+        font="Segoe UI", fontSize=22, fontWeight="bold", dy=-8
     ).encode(text="t:N")
 
     center_lab = alt.Chart(pd.DataFrame({"t":[f"({lab})"]})).mark_text(
-        font="Segoe UI", fontSize=14, dy=20
+        font="Segoe UI", fontSize=14, dy=18
     ).encode(text="t:N")
 
-    return arcs + center_val + center_lab
+    # Piccolo tick a 50 per riferimento visivo
+    tick50 = pd.DataFrame({"start":[90-0.6], "end":[90+0.6]})
+    tick = alt.Chart(tick50).mark_arc(innerRadius=84, outerRadius=100, color="#666").encode(
+        theta="start:Q", theta2="end:Q"
+    )
+
+    return (arcs + tick + needle + mask + center_val + center_lab).configure_view(strokeWidth=0)
+
 
 # ========== UI ==========
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
