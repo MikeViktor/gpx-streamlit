@@ -1,74 +1,62 @@
 # -*- coding: utf-8 -*-
-import math
-import xml.etree.ElementTree as ET
+import io, math
+import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
 
-APP_TITLE = "Tempo percorrenza sentiero (web)"
-APP_VER   = "v2.6"
+# Per il gauge semicircolare
+import matplotlib.pyplot as plt
+from matplotlib.patches import Wedge
 
-# ===== Parametri ricampionamento / filtri =====
-RS_STEP_M     = 3.0      # passo ricampionamento quota
-RS_MIN_DELEV  = 0.25     # deadband per sommare D+/D-
-RS_MED_K      = 3        # finestra mediana (odd)
-RS_AVG_K      = 3        # finestra media mobile
-ABS_JUMP_RAW  = 100.0    # buco grezzo tra punti consecutivi
+# Prova ad usare gpxpy, altrimenti fallback su XML
+try:
+    import gpxpy  # type: ignore
+    HAS_GPXPY = True
+except Exception:
+    import xml.etree.ElementTree as ET
+    HAS_GPXPY = False
 
-# ===== Pesi Indice di Fatica =====
-W_D      = 0.5
-W_PLUS   = 1.0
-W_COMP   = 0.5
-W_STEEP  = 0.4
-W_STEEP_D= 0.3
-W_LCS    = 0.25
-W_BLOCKS = 0.15
-W_SURGE  = 0.25
-IF_S0    = 80.0
+APP_TITLE = "Analisi Tracce GPX"
+APP_ICON  = "⛰️"
+
+# ======= Costanti identiche al programma desktop =======
+# Ricampionamento / smoothing
+RS_STEP_M     = 3.0
+RS_MIN_DELEV  = 0.25
+RS_MED_K      = 3
+RS_AVG_K      = 3
+ABS_JUMP_RAW  = 100.0
+
+# Chiusura anello & bilanciamento
+LOOP_TOL_M        = 200.0
+DRIFT_MIN_ABS_M   = 2.0
+BALANCE_MIN_DIFFM = 10.0
+BALANCE_REL_FRAC  = 0.05
+
+# Pesi Indice Difficoltà
+W_D, W_PLUS, W_COMP = 0.5, 1.0, 0.5
+W_STEEP, W_STEEP_D  = 0.4, 0.3
+W_LCS, W_BLOCKS, W_SURGE = 0.25, 0.15, 0.25
+IF_S0 = 80.0
 ALPHA_METEO = 0.6
+SEVERITY_GAIN = 1.52  # ~ +10% rispetto a 1.38
 
-# ===== Default UI (si ripristinano a nuovo GPX) =====
-DEFAULTS = {
-    "base": 15.0, "up": 15.0, "down": 15.0,
-    "weight": 70.0, "reverse": False,
-    "temp": 15.0, "hum": 50.0, "wind": 5.0,
-    "precip_sel": "assenza pioggia",
-    "surface_sel": "asciutto",
-    "expo_sel": "misto",
-    "tech_sel": "normale",
-    "loadkg": 6.0,
-}
+# Opzioni (IT)
+PRECIP_OPTIONS = ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"]
+SURF_OPTIONS   = ["asciutto","fango","roccia bagnata","neve dura","ghiaccio"]
+EXPO_OPTIONS   = ["ombra","misto","pieno sole"]
+TECH_OPTIONS   = ["facile","normale","roccioso","passaggi di roccia (scrambling)","neve/ghiaccio"]
 
-def ensure_defaults():
-    for k, v in DEFAULTS.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+DEFAULTS = dict(
+    base=15.0, up=15.0, down=15.0, weight=70.0, reverse=False,
+    temp=15.0, hum=50.0, wind=5.0,
+    precip="assenza pioggia", surface="asciutto",
+    expo="misto", tech="normale", loadkg=6.0
+)
 
-# ---------- Utilità GPX / calcoli ----------
-def _is_tag(e, name: str) -> bool:
-    t = e.tag
-    return t.endswith('}' + name) or t == name
-
-def parse_gpx_bytes(file_bytes: bytes):
-    """Ritorna (lat[], lon[], ele[], tipo_punto) cercando trkpt → rtept → wpt (richiede <ele>)."""
-    root = ET.fromstring(file_bytes)
-    for wanted in ("trkpt", "rtept", "wpt"):
-        lat, lon, ele = [], [], []
-        for el in root.iter():
-            if _is_tag(el, wanted):
-                la = el.attrib.get("lat"); lo = el.attrib.get("lon")
-                if la is None or lo is None: continue
-                z = None
-                for ch in el:
-                    if _is_tag(ch, "ele"): z = ch.text; break
-                if z is None: continue
-                try:
-                    lat.append(float(la)); lon.append(float(lo)); ele.append(float(z))
-                except: pass
-        if lat: return lat, lon, ele, wanted
-    return [], [], [], None
-
-def dist_km(lat1, lon1, lat2, lon2):
+# ========== Utility numeriche ==========
+def _dist_km(lat1, lon1, lat2, lon2):
     dy = (lat2 - lat1) * 111.32
     dx = (lon2 - lon1) * 111.32 * math.cos(math.radians((lat1 + lat2) / 2.0))
     return math.hypot(dx, dy)
@@ -76,438 +64,433 @@ def dist_km(lat1, lon1, lat2, lon2):
 def median_k(seq, k=3):
     if k < 1: k = 1
     if k % 2 == 0: k += 1
-    half = k // 2
-    out = []
-    n = len(seq)
+    h = k // 2; out = []; n = len(seq)
     for i in range(n):
-        a = max(0, i - half); b = min(n, i + half + 1)
-        window = sorted(seq[a:b])
-        out.append(window[len(window)//2])
+        a = max(0, i - h); b = min(n, i + h + 1)
+        w = sorted(seq[a:b]); out.append(w[len(w)//2])
     return out
 
 def moving_avg(seq, k=3):
     if k < 1: k = 1
-    half = k // 2
-    out = []
-    n = len(seq)
+    h = k // 2; out = []; n = len(seq)
     for i in range(n):
-        a = max(0, i - half); b = min(n, i + half + 1)
+        a = max(0, i - h); b = min(n, i + h + 1)
         out.append(sum(seq[a:b]) / max(1, b - a))
     return out
 
 def resample_elev(cum_m, ele, step_m=3.0):
-    if len(cum_m) != len(ele): raise ValueError("cum_m/ele di diversa lunghezza")
     total = cum_m[-1]
     n = int(total // step_m) + 1
-    out = []
-    t = 0.0; j = 0
+    out = []; t = 0.0; j = 0
     for _ in range(n):
-        while j < len(cum_m) - 1 and cum_m[j+1] < t: j += 1
-        if t <= cum_m[0]:
-            out.append(ele[0])
-        elif t >= cum_m[-1]:
-            out.append(ele[-1])
+        while j < len(cum_m)-1 and cum_m[j+1] < t: j += 1
+        if t <= cum_m[0]: out.append(ele[0])
+        elif t >= cum_m[-1]: out.append(ele[-1])
         else:
             u = (t - cum_m[j]) / (cum_m[j+1] - cum_m[j])
             out.append(ele[j] + u * (ele[j+1] - ele[j]))
         t += step_m
     return out
 
-def fmt_hm(minutes):
-    h = int(minutes // 60); m = int(round(minutes - h*60))
-    if m == 60: h += 1; m = 0
-    return f"{h}:{m:02d}"
+def _is_loop(lat, lon, tol_m=LOOP_TOL_M):
+    if len(lat) < 2: return False
+    return _dist_km(lat[0], lon[0], lat[-1], lon[-1]) * 1000.0 <= tol_m
 
-# ---- Moltiplicatori condizioni ----
-def meteo_multiplier(temp_c: float, humidity_pct: float, precip: str, surface: str,
-                     wind_kmh: float, exposure: str) -> float:
+def apply_loop_drift_correction(elev_series, lat, lon, min_abs=DRIFT_MIN_ABS_M):
+    if not _is_loop(lat, lon) or len(elev_series) < 2:
+        return elev_series, False, 0.0
+    drift = elev_series[-1] - elev_series[0]
+    if abs(drift) < min_abs: return elev_series, False, drift
+    n = len(elev_series) - 1
+    fixed = [elev_series[i] - (drift * (i / n)) for i in range(len(elev_series))]
+    return fixed, True, drift
+
+# ========== Meteo/tecnica ==========
+def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
     if   temp_c < -5: M_temp = 1.20
     elif temp_c < 0:  M_temp = 1.10
     elif temp_c < 5:  M_temp = 1.05
-    elif temp_c <= 20:M_temp = 1.00
-    elif temp_c <= 25:M_temp = 1.05
-    elif temp_c <= 30:M_temp = 1.10
-    elif temp_c <= 35:M_temp = 1.20
-    else:             M_temp = 1.35
+    elif temp_c <= 20: M_temp = 1.00
+    elif temp_c <= 25: M_temp = 1.05
+    elif temp_c <= 30: M_temp = 1.10
+    elif temp_c <= 35: M_temp = 1.20
+    else: M_temp = 1.35
     if   humidity_pct > 80: M_temp += 0.10
     elif humidity_pct > 60: M_temp += 0.05
 
-    precip_map = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}
+    precip_map  = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}
     surface_map = {"dry":1.00,"mud":1.10,"wet_rock":1.15,"hard_snow":1.30,"ice":1.60}
-    exposure_map = {"shade":1.00,"mixed":1.05,"sun":1.10}
-
-    M_precip  = precip_map.get(precip, 1.00)
-    M_surface = surface_map.get(surface, 1.00)
-    M_sun     = exposure_map.get(exposure, 1.00)
+    exposure_map= {"shade":1.00,"mixed":1.05,"sun":1.10}
+    M_precip  = precip_map.get(precip,1.0)
+    M_surface = surface_map.get(surface,1.0)
+    M_sun     = exposure_map.get(exposure,1.0)
 
     if   wind_kmh <= 10: M_wind = 1.00
     elif wind_kmh <= 20: M_wind = 1.05
     elif wind_kmh <= 35: M_wind = 1.10
     elif wind_kmh <= 60: M_wind = 1.20
-    else:                M_wind = 1.35
+    else: M_wind = 1.35
 
-    M_meteo = M_temp * max(M_precip, M_surface) * M_wind * M_sun
-    return min(1.4, M_meteo)
+    return min(1.4, M_temp * max(M_precip, M_surface) * M_wind * M_sun)
 
 def altitude_multiplier(avg_alt_m):
     if avg_alt_m is None: return 1.0
-    excess = max(0.0, (avg_alt_m - 2000.0) / 500.0)
+    excess = max(0.0, (avg_alt_m - 2000.0)/500.0)
     return 1.0 + 0.03 * excess
 
-def technique_multiplier(level: str = "normale") -> float:
-    table = {
-        "facile": 0.95,
-        "normale": 1.00,
-        "roccioso": 1.10,
-        "passaggi di roccia (scrambling)": 1.20,
-        "neve/ghiaccio": 1.30,
-        # retro-compatibilità
-        "scrambling": 1.20,
-    }
-    return table.get(level, 1.0)
+def technique_multiplier(level="normale"):
+    table = {"facile":0.95,"normale":1.00,"roccioso":1.10,
+             "passaggi di roccia (scrambling)":1.20,"neve/ghiaccio":1.30,
+             "scrambling":1.20}
+    return table.get(level,1.0)
 
-def pack_load_multiplier(extra_load_kg: float = 0.0) -> float:
-    return 1.0 + 0.02 * max(0.0, extra_load_kg / 5.0)
+def pack_load_multiplier(extra_load_kg=0.0):
+    return 1.0 + 0.02 * max(0.0, extra_load_kg/5.0)
 
 def cat_from_if(val: float) -> str:
     if val < 30: return "Facile"
     if val < 50: return "Medio"
     if val < 70: return "Impegnativo"
-    return "Molto impegnativo"
+    if val < 80: return "Difficile"
+    if val <= 90: return "Molto difficile"
+    return "Estremo"
 
-# ---- Calcolo principale dal GPX (bytes) ----
-def compute_from_gpx_bytes(file_bytes: bytes,
-                           base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
-                           weight_kg=70.0, reverse=False):
-    lat, lon, ele_raw, _kind = parse_gpx_bytes(file_bytes)
-    if not ele_raw or len(ele_raw) < 2:
-        raise ValueError("Nessun punto utile con elevazione nel GPX.")
+# ========== Parsing GPX ==========
+def parse_gpx(uploaded_file) -> pd.DataFrame:
+    if HAS_GPXPY:
+        text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+        gpx = gpxpy.parse(io.StringIO(text))
+        pts = []
+        for trk in gpx.tracks:
+            for seg in trk.segments:
+                for p in seg.points:
+                    if p.elevation is None: continue
+                    pts.append((p.latitude, p.longitude, float(p.elevation)))
+        if not pts:
+            for rte in gpx.routes:
+                for p in rte.points:
+                    if p.elevation is None: continue
+                    pts.append((p.latitude, p.longitude, float(p.elevation)))
+        df = pd.DataFrame(pts, columns=["lat","lon","ele"])
+    else:
+        raw = uploaded_file.getvalue()
+        root = ET.fromstring(raw)
+        def is_tag(el, name):
+            t = el.tag; return t.endswith('}' + name) or t == name
+        pts = []
+        for wanted in ("trkpt","rtept","wpt"):
+            pts.clear()
+            for el in root.iter():
+                if is_tag(el, wanted):
+                    la = el.attrib.get("lat"); lo = el.attrib.get("lon")
+                    if la is None or lo is None: continue
+                    ele = None
+                    for ch in el:
+                        if is_tag(ch, "ele"): ele = ch.text; break
+                    if ele is None: continue
+                    try: pts.append((float(la), float(lo), float(ele)))
+                    except: pass
+            if pts: break
+        df = pd.DataFrame(pts, columns=["lat","lon","ele"])
+    if df.empty: return df
+    dist = [0.0]
+    for i in range(1, len(df)):
+        dist.append(dist[-1] + _dist_km(df.lat[i-1], df.lon[i-1], df.lat[i], df.lon[i])*1000.0)
+    df["dist_m"] = dist
+    return df
 
+# ========== Motore di calcolo identico al desktop ==========
+def compute_from_arrays(lat, lon, ele_raw,
+                        base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
+                        weight_kg=70.0, reverse=False):
+    if len(ele_raw) < 2: raise ValueError("Nessun punto utile con quota.")
     if reverse:
-        lat = list(reversed(lat)); lon = list(reversed(lon)); ele_raw = list(reversed(ele_raw))
+        lat=list(reversed(lat)); lon=list(reversed(lon)); ele_raw=list(reversed(ele_raw))
 
-    # distanza cumulata (m)
-    cum = [0.0]
-    for i in range(1, len(lat)):
-        cum.append(cum[-1] + dist_km(lat[i-1], lon[i-1], lat[i], lon[i]) * 1000.0)
-    tot_km = cum[-1] / 1000.0
-    total_m = cum[-1]
+    cum=[0.0]
+    for i in range(1,len(lat)):
+        cum.append(cum[-1]+_dist_km(lat[i-1],lon[i-1],lat[i],lon[i])*1000.0)
+    tot_km=cum[-1]/1000.0; total_m=cum[-1]
 
-    # ricampionamento + filtri
-    e_res = resample_elev(cum, ele_raw, RS_STEP_M)
-    e_med = median_k(e_res, RS_MED_K)
-    e_sm  = moving_avg(e_med, RS_AVG_K)
+    e_res=resample_elev(cum,ele_raw,RS_STEP_M)
+    e_res, loop_fix, loop_drift = apply_loop_drift_correction(e_res,lat,lon)
+    e_med=median_k(e_res,RS_MED_K); e_sm=moving_avg(e_med,RS_AVG_K)
 
-    # metriche base
-    dplus = dneg = 0.0
-    asc_len = desc_len = flat_len = 0.0
-    asc_gain = desc_drop = 0.0
+    dplus=dneg=0.0; asc_len=desc_len=flat_len=0.0; asc_gain=desc_drop=0.0
+    asc_bins=[0,0,0,0,0]; desc_bins=[0,0,0,0,0]
+    longest_steep_run=0.0; current_run=0.0; blocks25=0; last_state=0; surge_trans=0
 
-    asc_bins = [0.0, 0.0, 0.0, 0.0, 0.0]   # <10, 10–20, 20–30, 30–40, >40 (m)
-    desc_bins= [0.0, 0.0, 0.0, 0.0, 0.0]
-
-    # IF avanzate su SALITA
-    longest_steep_run = 0.0
-    current_run = 0.0
-    blocks25_count = 0
-    last_state = 0   # 0=altro, 1=gentle up (<15%), 2=steep up (≥25%)
-    surge_transitions = 0
-
-    for i in range(1, len(e_sm)):
-        t_prev = (i-1) * RS_STEP_M
-        t_curr = min(i * RS_STEP_M, total_m)
-        seg = max(0.0, t_curr - t_prev)
-        if seg <= 0: continue
-
-        d = e_sm[i] - e_sm[i-1]
-        if d > RS_MIN_DELEV:
-            dplus += d; asc_len += seg; asc_gain += d
-            g = (d / seg) * 100.0
-            if   g < 10: asc_bins[0] += seg
-            elif g < 20: asc_bins[1] += seg
-            elif g < 30: asc_bins[2] += seg
-            elif g < 40: asc_bins[3] += seg
-            else:        asc_bins[4] += seg
-            if g >= 25.0:
-                current_run += seg
-                if current_run > longest_steep_run: longest_steep_run = current_run
-                state = 2
+    for i in range(1,len(e_sm)):
+        t_prev=(i-1)*RS_STEP_M; t_curr=min(i*RS_STEP_M,total_m); seg=max(0.0,t_curr-t_prev)
+        if seg<=0: continue
+        d=e_sm[i]-e_sm[i-1]
+        if d>RS_MIN_DELEV:
+            dplus+=d; asc_len+=seg; asc_gain+=d; g=(d/seg)*100.0
+            if   g<10: asc_bins[0]+=seg
+            elif g<20: asc_bins[1]+=seg
+            elif g<30: asc_bins[2]+=seg
+            elif g<40: asc_bins[3]+=seg
+            else:      asc_bins[4]+=seg
+            if g>=25: current_run+=seg; longest_steep_run=max(longest_steep_run,current_run); state=2
             else:
-                if current_run >= 100.0: blocks25_count += 1
-                current_run = 0.0
-                state = 1 if g < 15.0 else 0
-            if (last_state in (1,2)) and (state in (1,2)) and (state != last_state):
-                surge_transitions += 1
-            if state != 0: last_state = state
-        elif d < -RS_MIN_DELEV:
-            drop = -d; dneg += drop; desc_len += seg; desc_drop += drop
-            g = (drop / seg) * 100.0
-            if   g < 10: desc_bins[0] += seg
-            elif g < 20: desc_bins[1] += seg
-            elif g < 30: desc_bins[2] += seg
-            elif g < 40: desc_bins[3] += seg
-            else:        desc_bins[4] += seg
-            if current_run >= 100.0: blocks25_count += 1
-            current_run = 0.0
-            last_state = 0
+                if current_run>=100: blocks25+=1
+                current_run=0.0; state=1 if g<15 else 0
+            if (last_state in (1,2)) and (state in (1,2)) and (state!=last_state): surge_trans+=1
+            if state!=0: last_state=state
+        elif d<-RS_MIN_DELEV:
+            drop=-d; dneg+=drop; desc_len+=seg; desc_drop+=drop; g=(drop/seg)*100.0
+            if   g<10: desc_bins[0]+=seg
+            elif g<20: desc_bins[1]+=seg
+            elif g<30: desc_bins[2]+=seg
+            elif g<40: desc_bins[3]+=seg
+            else:      desc_bins[4]+=seg
+            if current_run>=100: blocks25+=1
+            current_run=0.0; last_state=0
         else:
-            flat_len += seg
-            if current_run >= 100.0: blocks25_count += 1
-            current_run = 0.0
-            last_state = 0
+            flat_len+=seg
+            if current_run>=100: blocks25+=1
+            current_run=0.0; last_state=0
+    if current_run>=100: blocks25+=1
 
-    if current_run >= 100.0: blocks25_count += 1
+    loop_like=_is_loop(lat,lon,LOOP_TOL_M)
+    diff=abs(dplus-dneg)
+    need_balance = loop_like and (diff>max(BALANCE_MIN_DIFFM,BALANCE_REL_FRAC*max(dplus,dneg)))
+    balance=False
+    if need_balance:
+        dplus=dneg; asc_gain=dplus; balance=True
 
-    grade_up_pct   = (asc_gain / asc_len * 100.0)  if asc_len  > 0 else 0.0
-    grade_down_pct = (desc_drop / desc_len * 100.0) if desc_len > 0 else 0.0
+    grade_up   = (asc_gain/asc_len*100.0)  if asc_len>0 else 0.0
+    grade_down = (desc_drop/desc_len*100.0) if desc_len>0 else 0.0
 
-    t_dist  = tot_km * base_min_per_km
-    t_up    = (dplus / 100.0) * up_min_per_100m
-    t_down  = (dneg  / 200.0) * down_min_per_200m
-    t_total = t_dist + t_up + t_down
+    t_dist  = tot_km*base_min_per_km
+    t_up    = (dplus/100.0)*up_min_per_100m
+    t_down  = (dneg/200.0)*down_min_per_200m
+    t_total = t_dist+t_up+t_down
 
-    holes = sum(1 for i in range(1, len(ele_raw)) if abs(ele_raw[i] - ele_raw[i-1]) >= ABS_JUMP_RAW)
+    holes = sum(1 for i in range(1,len(ele_raw)) if abs(ele_raw[i]-ele_raw[i-1])>=ABS_JUMP_RAW)
 
-    # calorie
-    weight_kg = max(1.0, float(weight_kg))
-    cal_flat = weight_kg * 0.6  * max(0.0, tot_km)
-    cal_up   = weight_kg * 0.006* max(0.0, dplus)
-    cal_down = weight_kg * 0.003* max(0.0, dneg)
-    cal_tot  = int(round(cal_flat + cal_up + cal_down))
+    weight_kg=max(1.0,float(weight_kg))
+    cal_flat=weight_kg*0.6*max(0.0,tot_km)
+    cal_up  =weight_kg*0.006*max(0.0,dplus)
+    cal_down=weight_kg*0.003*max(0.0,dneg)
+    cal_tot=int(round(cal_flat+cal_up+cal_down))
 
-    surge_per_km = (surge_transitions / max(0.001, tot_km))
+    x_km=[min(i*RS_STEP_M,total_m)/1000.0 for i in range(len(e_sm))]
 
-    df = pd.DataFrame({"km":[c/1000.0 for c in cum], "elev_m": ele_raw})
+    surge_idx = round(surge_trans / max(0.1, tot_km), 2)
 
     return {
-        "tot_km": round(tot_km, 2),
-        "dplus": round(dplus, 0),
-        "dneg": round(dneg, 0),
+        "tot_km": round(tot_km,2), "dplus": round(dplus,0), "dneg": round(dneg,0),
         "t_dist": t_dist, "t_up": t_up, "t_down": t_down, "t_total": t_total,
         "holes": holes,
-        "len_flat_km": round(flat_len/1000.0, 2),
-        "len_up_km":   round(asc_len /1000.0, 2),
-        "len_down_km": round(desc_len/1000.0, 2),
-        "grade_up_pct":   round(grade_up_pct, 1),
-        "grade_down_pct": round(grade_down_pct, 1),
+        "len_flat_km": round(flat_len/1000.0,2), "len_up_km": round(asc_len/1000.0,2), "len_down_km": round(desc_len/1000.0,2),
+        "grade_up_pct": round(grade_up,1), "grade_down_pct": round(grade_down,1),
         "cal_total": cal_tot,
-        "cal_flat":  int(round(cal_flat)),
-        "cal_up":    int(round(cal_up)),
-        "cal_down":  int(round(cal_down)),
-        "asc_bins_m":  asc_bins,
-        "desc_bins_m": desc_bins,
-        "lcs25_m": int(round(longest_steep_run)),
-        "blocks25_count": int(blocks25_count),
-        "surge_idx_per_km": round(surge_per_km, 2),
-        "avg_alt_m": sum(ele_raw)/len(ele_raw) if ele_raw else None,
-        "df_profile": df
+        "asc_bins_m": [round(v,0) for v in asc_bins],
+        "desc_bins_m": [round(v,0) for v in desc_bins],
+        "lcs25_m": round(longest_steep_run,0),
+        "blocks25_count": int(blocks25),
+        "surge_idx_per_km": surge_idx,
+        "avg_alt_m": float(np.mean(ele_raw)) if ele_raw else None,
+        "profile_x_km": x_km, "profile_y_m": e_sm[:],
+        "loop_fix_applied": bool(loop_fix), "loop_drift_abs_m": round(abs(loop_drift),1),
+        "loop_balance_applied": bool(balance), "loop_like": bool(loop_like), "balance_diff_m": round(diff,1),
     }
 
-def compute_if_from_res(res: dict,
-                        temp_c: float, humidity_pct: float, precip_it: str, surface_it: str,
-                        wind_kmh: float, expo_it: str,
-                        technique_level: str, extra_load_kg: float):
-    D_km = float(res["tot_km"]); Dp = float(res["dplus"])
-    ascL_m = 1000.0 * float(res["len_up_km"]); descL_m = 1000.0 * float(res["len_down_km"])
-    C = (Dp / max(0.001, D_km))
-    asc_bins = res["asc_bins_m"]; desc_bins = res["desc_bins_m"]
+def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_kmh, expo_it, technique_level, extra_load_kg):
+    D_km=float(res["tot_km"]); Dp=float(res["dplus"])
+    C=(Dp/max(0.001,D_km))
 
-    def frac_ge25(bins_m, total_len_m):
-        if total_len_m <= 0: return 0.0
-        m_20_30, m_30_40, m_over40 = bins_m[2], bins_m[3], bins_m[4]
-        approx = 0.5*m_20_30 + m_30_40 + m_over40
-        return min(1.0, max(0.0, approx / total_len_m))
+    ascL=1000.0*float(res["len_up_km"]); descL=1000.0*float(res["len_down_km"])
+    ab = res.get("asc_bins_m",[0,0,0,0,0]); db = res.get("desc_bins_m",[0,0,0,0,0])
+    up25_m   = (ab[3] if len(ab)>3 else 0) + (ab[4] if len(ab)>4 else 0)
+    down25_m = (db[3] if len(db)>3 else 0) + (db[4] if len(db)>4 else 0)
+    f_up25   = up25_m   / max(1.0, ascL)
+    f_down25 = down25_m / max(1.0, descL)
 
-    f_up25   = frac_ge25(asc_bins,  ascL_m)
-    f_down25 = frac_ge25(desc_bins, descL_m)
+    lcs   = float(res.get("lcs25_m",0.0))
+    blocks= float(res.get("blocks25_count",0.0))
+    surge = float(res.get("surge_idx_per_km",0.0))
+    lcs_sc = lcs/200.0
 
-    lcs = float(res["lcs25_m"]); blocks = float(res["blocks25_count"]); surge = float(res["surge_idx_per_km"])
-    lcs_scaled = lcs / 200.0
+    S=(W_D*D_km + W_PLUS*(Dp/100.0) + W_COMP*(C/100.0) +
+       W_STEEP*(100.0*f_up25) + W_STEEP_D*(100.0*f_down25) +
+       W_LCS*lcs_sc + W_BLOCKS*blocks + W_SURGE*surge)
 
-    S = (W_D*D_km + W_PLUS*(Dp/100.0) + W_COMP*(C/100.0) +
-         W_STEEP*(100.0*f_up25) + W_STEEP_D*(100.0*f_down25) +
-         W_LCS*lcs_scaled + W_BLOCKS*blocks + W_SURGE*surge)
+    IF_base=100.0*(1.0 - math.exp(-S/max(1e-6,IF_S0)))
 
-    IF_base = 100.0 * (1.0 - math.exp(-S / max(1e-6, IF_S0)))
+    precip_map={"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
+    surf_map={"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
+    expo_map={"ombra":"shade","misto":"mixed","pieno sole":"sun"}
 
-    precip_map = {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
-    surf_map   = {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
-    expo_map   = {"ombra":"shade","misto":"mixed","pieno sole":"sun"}
+    M = meteo_multiplier(temp_c, humidity_pct, precip_map[precip_it], surf_map[surface_it], wind_kmh, expo_map[expo_it]) \
+        * altitude_multiplier(res.get("avg_alt_m")) \
+        * technique_multiplier(technique_level) \
+        * pack_load_multiplier(extra_load_kg)
 
-    M_meteo = meteo_multiplier(temp_c, humidity_pct,
-                               precip_map.get(precip_it, "dry"),
-                               surf_map.get(surface_it, "dry"),
-                               wind_kmh, expo_map.get(expo_it, "mixed"))
-    M_alt   = altitude_multiplier(res.get("avg_alt_m"))
-    M_tech  = technique_multiplier(technique_level)
-    M_load  = pack_load_multiplier(extra_load_kg)
-    M_tot   = M_meteo * M_alt * M_tech * M_load
+    bump = (100.0 - IF_base) * max(0.0, (M - 1.0)) * ALPHA_METEO
+    IF = min(100.0, (IF_base + bump) * SEVERITY_GAIN)
+    IF = round(IF,1)
 
-    bump = (100.0 - IF_base) * max(0.0, (M_tot - 1.0)) * ALPHA_METEO
-    IF = min(100.0, IF_base + bump)
+    if   IF < 30: cat="Facile"
+    elif IF < 50: cat="Medio"
+    elif IF < 70: cat="Impegnativo"
+    elif IF < 80: cat="Difficile"
+    elif IF <= 90: cat="Molto difficile"
+    else: cat="Estremo"
+    return {"IF": IF, "cat": cat}
 
-    return {"IF": round(IF,1), "IF_base": round(IF_base,1),
-            "M_meteo": round(M_meteo,2), "M_alt": round(M_alt,2),
-            "M_tech": round(M_tech,2), "M_load": round(M_load,2),
-            "cat": cat_from_if(round(IF,1))}
+# ========== Gauge semicircolare ==========
+def draw_gauge(score: float):
+    # bins (uguali al desktop)
+    bins = [
+        (0,30,"#2ecc71","Facile"),
+        (30,50,"#f1c40f","Medio"),
+        (50,70,"#e67e22","Impeg."),
+        (70,80,"#e74c3c","Diffic."),
+        (80,90,"#8e44ad","Molto diff."),
+        (90,100,"#111111","Estremo"),
+    ]
+    fig, ax = plt.subplots(figsize=(6.2,2.8))
+    ax.set_xlim(-1.1,1.1); ax.set_ylim(-0.15,1.15); ax.axis("off")
+    # arco colorato
+    for a,b,col,_ in bins:
+        th1 = 180 - (a/100.0)*180.0
+        th2 = 180 - (b/100.0)*180.0
+        ax.add_patch(Wedge((0,0),1.0, th2, th1, width=0.25, color=col, ec=col))
+    # tacche 0-50-100
+    for v in (0,50,100):
+        ang = math.radians(180 - (v/100.0)*180.0)
+        x1,y1 = 0.75*math.cos(ang), 0.75*math.sin(ang)
+        x2,y2 = 1.05*math.cos(ang), 1.05*math.sin(ang)
+        ax.plot([x1,x2],[y1,y2], color="#666", lw=1)
+        xt, yt = 1.12*math.cos(ang), 1.12*math.sin(ang)
+        ax.text(xt, yt, f"{v}", ha="center", va="center", fontsize=9, color="#444")
+    # etichette categorie
+    for a,b,_,lab in bins:
+        m=(a+b)/2.0; ang=math.radians(180 - (m/100.0)*180.0)
+        xt, yt = 0.85*math.cos(ang), 0.85*math.sin(ang)
+        ax.text(xt, yt, lab, ha="center", va="center", fontsize=9, fontweight="bold", color="#111")
+    # ago
+    s = max(0.0, min(100.0, score))
+    ang=math.radians(180 - (s/100.0)*180.0)
+    ax.plot([0, 0.65*math.cos(ang)], [0, 0.65*math.sin(ang)], lw=3, color="#333")
+    ax.add_patch(plt.Circle((0,0), 0.035, color="#333"))
+    # valore
+    ax.text(0, -0.02, f"{s:.1f}", ha="center", va="top", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    return fig
 
-# ===================== UI Streamlit =====================
-st.set_page_config(page_title=APP_TITLE, page_icon="🗺️", layout="wide")
-st.title(f"{APP_TITLE} — {APP_VER}")
+# ========== UI ==========
+st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
+st.title(APP_TITLE)
 
-ensure_defaults()
+# uploader e reset dei parametri quando cambia file
+uploaded = st.file_uploader("📂 Carica GPX", type=["gpx"])
+if "gpx_name" not in st.session_state: st.session_state.gpx_name = None
+file_changed = False
+if uploaded is not None and uploaded.name != st.session_state.gpx_name:
+    st.session_state.gpx_name = uploaded.name
+    # reset parametri a default
+    for k,v in DEFAULTS.items():
+        st.session_state[k] = v
+    file_changed = True
 
-# Barra superiore: Carica + Calcola
-top = st.container()
-with top:
-    c1, c2, c3 = st.columns([4, 1.2, 1])
-    gpx = c1.file_uploader("Carica GPX", type=["gpx"], key="gpx_file")
-    _recalc = c2.button("Calcola", use_container_width=True)
-
-    file_bytes = None
-    if gpx is not None:
-        file_bytes = gpx.getvalue()
-        sig = f"{gpx.name}|{len(file_bytes)}"
-        if st.session_state.get("last_gpx_sig") != sig:
-            st.session_state["last_gpx_sig"] = sig
-            # reset parametri ai default
-            for k, v in DEFAULTS.items():
-                st.session_state[k] = v
-    if gpx is not None:
-        c3.caption(f"Selezionato: {gpx.name}")
-
-# Sidebar impostazioni
+# pannello parametri
 with st.sidebar:
-    st.header("Impostazioni")
-    base    = st.number_input("Min/km (piano)",     min_value=1.0, step=0.5, key="base")
-    up      = st.number_input("Min/100 m (salita)", min_value=1.0, step=0.5, key="up")
-    down    = st.number_input("Min/200 m (discesa)",min_value=1.0, step=0.5, key="down")
-    weight  = st.number_input("Peso (kg)", min_value=30.0, step=1.0, key="weight")
-    reverse = st.checkbox(
-        "Inverti traccia", key="reverse",
-        help="Inverti l'ordine dei punti del GPX (utile se la traccia è registrata al contrario)."
-    )
+    st.markdown("### Impostazioni")
+    base = st.number_input("Min/km (piano)", min_value=1.0, max_value=60.0, step=0.5,
+                           value=st.session_state.get("base", DEFAULTS["base"]), key="base")
+    up   = st.number_input("Min/100 m (salita)", min_value=1.0, max_value=60.0, step=0.5,
+                           value=st.session_state.get("up", DEFAULTS["up"]), key="up")
+    down = st.number_input("Min/200 m (discesa)", min_value=1.0, max_value=60.0, step=0.5,
+                           value=st.session_state.get("down", DEFAULTS["down"]), key="down")
+    weight = st.number_input("Peso (kg)", min_value=30.0, max_value=150.0, step=1.0,
+                             value=st.session_state.get("weight", DEFAULTS["weight"]), key="weight")
+    reverse = st.checkbox("Inverti traccia", value=st.session_state.get("reverse", DEFAULTS["reverse"]), key="reverse")
 
-    st.markdown("---")
-    st.subheader("Condizioni")
-    temp  = st.number_input("Temperatura (°C)", step=1.0, key="temp")
-    hum   = st.number_input("Umidità (%)", step=1.0, min_value=0.0, max_value=100.0, key="hum")
-    wind  = st.number_input("Vento (km/h)", step=1.0, min_value=0.0, key="wind")
-    precip_it = st.selectbox("Precipitazioni",
-        ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"],
-        key="precip_sel")
-    surface_it = st.selectbox("Fondo",
-        ["asciutto","fango","roccia bagnata","neve dura","ghiaccio"],
-        key="surface_sel")
-    expo_it = st.selectbox("Esposizione",
-        ["ombra","misto","pieno sole"],
-        key="expo_sel")
-    tech_it = st.selectbox(
-        "Tecnica",
-        ["facile","normale","roccioso","passaggi di roccia (scrambling)","neve/ghiaccio"],
-        key="tech_sel",
-        help="Livello tecnico richiesto: da sentiero facile fino a brevi passaggi su roccia (I°/II°) senza attrezzatura."
-    )
-    loadkg = st.number_input("Zaino extra (kg)", step=1.0, min_value=0.0, key="loadkg")
+    st.markdown("### Condizioni")
+    temp = st.number_input("Temperatura (°C)", -30.0, 50.0, value=st.session_state.get("temp", DEFAULTS["temp"]), key="temp")
+    hum  = st.number_input("Umidità (%)", 0.0, 100.0, value=st.session_state.get("hum", DEFAULTS["hum"]), key="hum")
+    wind = st.number_input("Vento (km/h)", 0.0, 150.0, value=st.session_state.get("wind", DEFAULTS["wind"]), key="wind")
+    precip = st.selectbox("Precipitazioni", PRECIP_OPTIONS, index=PRECIP_OPTIONS.index(st.session_state.get("precip", DEFAULTS["precip"])), key="precip")
+    surface = st.selectbox("Fondo", SURF_OPTIONS, index=SURF_OPTIONS.index(st.session_state.get("surface", DEFAULTS["surface"])), key="surface")
+    expo = st.selectbox("Esposizione", EXPO_OPTIONS, index=EXPO_OPTIONS.index(st.session_state.get("expo", DEFAULTS["expo"])), key="expo")
+    tech = st.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(st.session_state.get("tech", DEFAULTS["tech"])), key="tech")
+    loadkg = st.number_input("Zaino extra (kg)", 0.0, 40.0, value=st.session_state.get("loadkg", DEFAULTS["loadkg"]), key="loadkg")
 
-colL, colR = st.columns([1.15, 1])
+# tre KPI principali
+k1, k2, k3 = st.columns(3)
 
-if not gpx:
-    st.info("Carica un file GPX per iniziare.")
+if uploaded is None:
+    k1.metric("Distanza (km)", "-")
+    k2.metric("Dislivello + (m)", "-")
+    k3.metric("Tempo totale", "-")
+    st.subheader("Indice di Difficoltà")
+    st.pyplot(draw_gauge(0.0), use_container_width=True)
 else:
-    try:
-        res = compute_from_gpx_bytes(file_bytes, base, up, down, weight, reverse=reverse)
-    except Exception as e:
-        st.error(str(e))
+    df = parse_gpx(uploaded)
+    if df.empty or df["ele"].isna().all():
+        st.warning("Il GPX non contiene punti utilizzabili con quota.")
     else:
-        with colL:
-            # === Riga alta a 3 colonne: Distanza · D+ · Tempo totale ===
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Distanza (km)", res["tot_km"])
-            m2.metric("Dislivello + (m)", int(res["dplus"]))
-            m3.metric("Tempo totale", fmt_hm(res["t_total"]))
+        lat = df["lat"].to_list(); lon = df["lon"].to_list(); ele = df["ele"].to_list()
 
-            # Seconda riga: D− + tempi parziali
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Dislivello − (m)", int(res["dneg"]))
-            c2.markdown(f"**Tempo piano:** {fmt_hm(res['t_dist'])}")
-            c3.markdown(f"**Tempo salita:** {fmt_hm(res['t_up'])}")
-            st.markdown(f"**Tempo discesa:** {fmt_hm(res['t_down'])}")
+        res = compute_from_arrays(lat, lon, ele, base, up, down, weight, reverse)
+        # KPI
+        k1.metric("Distanza (km)", f"{res['tot_km']:.2f}")
+        k2.metric("Dislivello + (m)", f"{int(res['dplus'])}")
+        # tempo totale h:mm
+        def fmt_hm(minutes):
+            h=int(minutes//60); m=int(round(minutes-h*60))
+            if m==60: h+=1; m=0
+            return f"{h}:{m:02d}"
+        k3.metric("Tempo totale", fmt_hm(res["t_total"]))
 
-            # Buchi GPX con tooltip
-            st.metric(
-                "Buchi GPX", int(res['holes']),
-                help="Numero di salti di quota > 100 m tra due punti consecutivi (probabile buco nella registrazione)."
-            )
+        # blocco risultati dettagliati
+        st.subheader("Risultati")
+        cA, cB, cC = st.columns(3)
+        with cA:
+            st.write(f"**Dislivello − (m):** {int(res['dneg'])}")
+            st.write(f"**Tempo piano:** {fmt_hm(res['t_dist'])}")
+            st.write(f"**Tempo salita:** {fmt_hm(res['t_up'])}")
+            st.write(f"**Tempo discesa:** {fmt_hm(res['t_down'])}")
+            st.write(f"**Calorie stimate:** {res['cal_total']}")
+        with cB:
+            st.write(f"**Piano (km):** {res['len_flat_km']:.2f}")
+            st.write(f"**Salita (km):** {res['len_up_km']:.2f}")
+            st.write(f"**Discesa (km):** {res['len_down_km']:.2f}")
+            st.write(f"**Pend. media salita (%):** {res['grade_up_pct']:.1f}")
+            st.write(f"**Pend. media discesa (%):** {res['grade_down_pct']:.1f}")
+        with cC:
+            holes = int(res["holes"])
+            st.write(f"**Buchi GPX:** {'🟥 ' if holes>0 else '🟩 '} {holes}")
+            st.write(f"**LCS ≥25% (m):** {int(res['lcs25_m'])}")
+            st.write(f"**Blocchi ripidi (≥100 m @ ≥25%):** {int(res['blocks25_count'])}")
+            st.write(f"**Surge (cambi ritmo)/km:** {res['surge_idx_per_km']:.2f}")
 
-            c4, c5, c6 = st.columns(3)
-            c4.markdown(f"**Piano:** {res['len_flat_km']:.2f} km")
-            c5.markdown(f"**Salita:** {res['len_up_km']:.2f} km")
-            c6.markdown(f"**Discesa:** {res['len_down_km']:.2f} km")
+        # Indice di Difficoltà
+        fi = compute_if_from_res(
+            res,
+            temp_c=temp, humidity_pct=hum,
+            precip_it=precip, surface_it=surface,
+            wind_kmh=wind, expo_it=expo,
+            technique_level=tech, extra_load_kg=loadkg
+        )
+        st.subheader("Indice di Difficoltà")
+        st.markdown(f"**{fi['IF']}  ({fi['cat']})**")
+        st.pyplot(draw_gauge(fi["IF"]), use_container_width=True)
 
-            c7, c8, c9 = st.columns(3)
-            c7.markdown(f"**Pend. media salita:** {res['grade_up_pct']:.1f} %")
-            c8.markdown(f"**Pend. media discesa:** {res['grade_down_pct']:.1f} %")
-            c9.markdown(f"**Calorie stimate:** {res['cal_total']} kcal")
+        # Profilo altimetrico
+        st.subheader("Profilo altimetrico")
+        prof = pd.DataFrame({"km":res["profile_x_km"], "elev":res["profile_y_m"]})
+        chart = alt.Chart(prof).mark_line().encode(
+            x=alt.X("km:Q", title="Distanza (km)"),
+            y=alt.Y("elev:Q", title="Quota (m)")
+        ).properties(height=320).interactive()
+        st.altair_chart(chart, use_container_width=True)
 
-            # fasce pendenza (metri)
-            ab = [int(round(x)) for x in res["asc_bins_m"]]
-            db = [int(round(x)) for x in res["desc_bins_m"]]
-            st.markdown("**Fasce pendenza (metri)**")
-            st.markdown(
-                f"**Salita:** &lt;10%: {ab[0]} m · 10–20%: {ab[1]} m · 20–30%: {ab[2]} m · 30–40%: {ab[3]} m · &gt;40%: {ab[4]} m",
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                f"**Discesa:** &lt;10%: {db[0]} m · 10–20%: {db[1]} m · 20–30%: {db[2]} m · 30–40%: {db[3]} m · &gt;40%: {db[4]} m",
-                unsafe_allow_html=True
-            )
-
-            # Profilo altimetrico
-            dfp = res["df_profile"]
-            chart = (
-                alt.Chart(dfp)
-                .mark_line()
-                .encode(
-                    x=alt.X("km:Q", axis=alt.Axis(title="Distanza (km)", grid=True)),
-                    y=alt.Y("elev_m:Q", axis=alt.Axis(title="Quota (m)", grid=True)),
-                    tooltip=[alt.Tooltip("km:Q", format=".2f", title="km"),
-                             alt.Tooltip("elev_m:Q", format=".0f", title="m")]
-                )
-                .properties(height=380)
-                .interactive()
-            )
-            st.altair_chart(chart, use_container_width=True)
-
-        with colR:
-            st.subheader("Indice di Fatica")
-            fi = compute_if_from_res(
-                res,
-                temp_c=float(st.session_state["temp"]), humidity_pct=float(st.session_state["hum"]),
-                precip_it=st.session_state["precip_sel"], surface_it=st.session_state["surface_sel"],
-                wind_kmh=float(st.session_state["wind"]), expo_it=st.session_state["expo_sel"],
-                technique_level=st.session_state["tech_sel"], extra_load_kg=float(st.session_state["loadkg"])
-            )
-            st.metric(
-                "Indice di Fatica",
-                f"{fi['IF']}  ({fi['cat']})",
-                help="0–30 Facile · 30–50 Medio · 50–70 Impegnativo · >70 Molto impegnativo"
-            )
-
-            # Metriche avanzate con tooltip
-            mL, mB, mS = st.columns(3)
-            mL.metric(
-                "LCS ≥25% (m)", res["lcs25_m"],
-                help="Lunghezza massima di tratto in SALITA con pendenza ≥ 25% senza interruzioni."
-            )
-            mB.metric(
-                "Blocchi ripidi (≥100 m @ ≥25%)", res["blocks25_count"],
-                help="Quanti segmenti in SALITA lunghi ≥100 m con pendenza ≥25%."
-            )
-            mS.metric(
-                "Surge (cambi ritmo)/km", res["surge_idx_per_km"],
-                help="Transizioni ripetute tra salita dolce (<15%) e salita ripida (≥25%) per chilometro."
-            )
-
-            csv = res["df_profile"].to_csv(index=False).encode("utf-8")
-            st.download_button("Scarica profilo (CSV)", csv, file_name="profilo_gpx.csv", mime="text/csv")
+        # note su correzioni anello
+        msgs=[]
+        if res.get("loop_fix_applied"): msgs.append(f"Corretta deriva ~{res['loop_drift_abs_m']} m")
+        if res.get("loop_balance_applied"): msgs.append(f"Chiusura anello: D+ allineato a D− (diff {res['balance_diff_m']} m)")
+        if msgs: st.info(" – ".join(msgs))
