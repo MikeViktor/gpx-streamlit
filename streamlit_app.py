@@ -1,38 +1,19 @@
 # -*- coding: utf-8 -*-
-import io, math, xml.etree.ElementTree as ET
+import math
+import xml.etree.ElementTree as ET
 import pandas as pd
 import streamlit as st
 import altair as alt
 
-# ===================== PDF backends =====================
-# Prova ReportLab, altrimenti fallback FPDF2. Se nessuno dei due è presente,
-# mostreremo un messaggio informativo e non un errore.
-PDF_BACKEND = None
-try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib import colors
-    from reportlab.pdfgen import canvas
-    PDF_BACKEND = "reportlab"
-except Exception:
-    try:
-        from fpdf import FPDF
-        PDF_BACKEND = "fpdf2"
-    except Exception:
-        PDF_BACKEND = None
-
-def _safe(s: str) -> str:
-    return (s.replace("−","-").replace("•","-").replace("°"," deg")
-              .replace("≥",">=").replace("≤","<="))
-
 APP_TITLE = "Tempo percorrenza sentiero (web)"
-APP_VER   = "v2.5"
+APP_VER   = "v2.6"
 
-# ===== Filtri/ricampionamento =====
-RS_STEP_M     = 3.0
-RS_MIN_DELEV  = 0.25
-RS_MED_K      = 3
-RS_AVG_K      = 3
-ABS_JUMP_RAW  = 100.0
+# ===== Parametri ricampionamento / filtri =====
+RS_STEP_M     = 3.0      # passo ricampionamento quota
+RS_MIN_DELEV  = 0.25     # deadband per sommare D+/D-
+RS_MED_K      = 3        # finestra mediana (odd)
+RS_AVG_K      = 3        # finestra media mobile
+ABS_JUMP_RAW  = 100.0    # buco grezzo tra punti consecutivi
 
 # ===== Pesi Indice di Fatica =====
 W_D      = 0.5
@@ -46,13 +27,30 @@ W_SURGE  = 0.25
 IF_S0    = 80.0
 ALPHA_METEO = 0.6
 
-# ---------------- Utility GPX / calcolo base ----------------
+# ===== Default UI (si ripristinano a nuovo GPX) =====
+DEFAULTS = {
+    "base": 15.0, "up": 15.0, "down": 15.0,
+    "weight": 70.0, "reverse": False,
+    "temp": 15.0, "hum": 50.0, "wind": 5.0,
+    "precip_sel": "assenza pioggia",
+    "surface_sel": "asciutto",
+    "expo_sel": "misto",
+    "tech_sel": "normale",
+    "loadkg": 6.0,
+}
+
+def ensure_defaults():
+    for k, v in DEFAULTS.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+# ---------- Utilità GPX / calcoli ----------
 def _is_tag(e, name: str) -> bool:
     t = e.tag
     return t.endswith('}' + name) or t == name
 
 def parse_gpx_bytes(file_bytes: bytes):
-    """Parsa GPX da bytes, supportando trkpt/rtept/wpt con ele."""
+    """Ritorna (lat[], lon[], ele[], tipo_punto) cercando trkpt → rtept → wpt (richiede <ele>)."""
     root = ET.fromstring(file_bytes)
     for wanted in ("trkpt", "rtept", "wpt"):
         lat, lon, ele = [], [], []
@@ -120,7 +118,7 @@ def fmt_hm(minutes):
     if m == 60: h += 1; m = 0
     return f"{h}:{m:02d}"
 
-# ---------------- Meteo & fattori ----------------
+# ---- Moltiplicatori condizioni ----
 def meteo_multiplier(temp_c: float, humidity_pct: float, precip: str, surface: str,
                      wind_kmh: float, exposure: str) -> float:
     if   temp_c < -5: M_temp = 1.20
@@ -157,7 +155,15 @@ def altitude_multiplier(avg_alt_m):
     return 1.0 + 0.03 * excess
 
 def technique_multiplier(level: str = "normale") -> float:
-    table = {"facile":0.95,"normale":1.00,"roccioso":1.10,"scrambling":1.20,"neve/ghiaccio":1.30}
+    table = {
+        "facile": 0.95,
+        "normale": 1.00,
+        "roccioso": 1.10,
+        "passaggi di roccia (scrambling)": 1.20,
+        "neve/ghiaccio": 1.30,
+        # retro-compatibilità
+        "scrambling": 1.20,
+    }
     return table.get(level, 1.0)
 
 def pack_load_multiplier(extra_load_kg: float = 0.0) -> float:
@@ -169,23 +175,7 @@ def cat_from_if(val: float) -> str:
     if val < 70: return "Impegnativo"
     return "Molto impegnativo"
 
-# ---------------- DEFAULT e reset su nuovo file ----------------
-DEFAULTS = {
-    "base": 15.0, "up": 15.0, "down": 15.0,
-    "weight": 70.0, "reverse": False,
-    "temp": 15.0, "hum": 50.0, "wind": 5.0,
-    "precip_sel": "assenza pioggia",
-    "surface_sel": "asciutto",
-    "expo_sel": "misto",
-    "tech_sel": "normale",
-    "loadkg": 6.0,
-}
-def ensure_defaults():
-    for k, v in DEFAULTS.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-# ---------------- Core calcoli ----------------
+# ---- Calcolo principale dal GPX (bytes) ----
 def compute_from_gpx_bytes(file_bytes: bytes,
                            base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
                            weight_kg=70.0, reverse=False):
@@ -213,15 +203,14 @@ def compute_from_gpx_bytes(file_bytes: bytes,
     asc_len = desc_len = flat_len = 0.0
     asc_gain = desc_drop = 0.0
 
-    # fasce pendenza (metri): <10, 10–20, 20–30, 30–40, >40
-    asc_bins = [0.0, 0.0, 0.0, 0.0, 0.0]
+    asc_bins = [0.0, 0.0, 0.0, 0.0, 0.0]   # <10, 10–20, 20–30, 30–40, >40 (m)
     desc_bins= [0.0, 0.0, 0.0, 0.0, 0.0]
 
     # IF avanzate su SALITA
     longest_steep_run = 0.0
     current_run = 0.0
     blocks25_count = 0
-    last_state = 0   # 0=altro, 1=gentle up (<15%), 2=steep up (>=25%)
+    last_state = 0   # 0=altro, 1=gentle up (<15%), 2=steep up (≥25%)
     surge_transitions = 0
 
     for i in range(1, len(e_sm)):
@@ -234,13 +223,11 @@ def compute_from_gpx_bytes(file_bytes: bytes,
         if d > RS_MIN_DELEV:
             dplus += d; asc_len += seg; asc_gain += d
             g = (d / seg) * 100.0
-            # fasce
             if   g < 10: asc_bins[0] += seg
             elif g < 20: asc_bins[1] += seg
             elif g < 30: asc_bins[2] += seg
             elif g < 40: asc_bins[3] += seg
             else:        asc_bins[4] += seg
-            # LCS / blocchi / surge su salita
             if g >= 25.0:
                 current_run += seg
                 if current_run > longest_steep_run: longest_steep_run = current_run
@@ -317,8 +304,8 @@ def compute_from_gpx_bytes(file_bytes: bytes,
     }
 
 def compute_if_from_res(res: dict,
-                        temp_c: float, humidity_pct: float, precip: str, surface: str,
-                        wind_kmh: float, exposure: str,
+                        temp_c: float, humidity_pct: float, precip_it: str, surface_it: str,
+                        wind_kmh: float, expo_it: str,
                         technique_level: str, extra_load_kg: float):
     D_km = float(res["tot_km"]); Dp = float(res["dplus"])
     ascL_m = 1000.0 * float(res["len_up_km"]); descL_m = 1000.0 * float(res["len_down_km"])
@@ -343,15 +330,14 @@ def compute_if_from_res(res: dict,
 
     IF_base = 100.0 * (1.0 - math.exp(-S / max(1e-6, IF_S0)))
 
-    # Mappature IT -> codici
     precip_map = {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
     surf_map   = {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
     expo_map   = {"ombra":"shade","misto":"mixed","pieno sole":"sun"}
 
     M_meteo = meteo_multiplier(temp_c, humidity_pct,
-                               precip_map.get(precip, "dry"),
-                               surf_map.get(surface, "dry"),
-                               wind_kmh, expo_map.get(exposure, "mixed"))
+                               precip_map.get(precip_it, "dry"),
+                               surf_map.get(surface_it, "dry"),
+                               wind_kmh, expo_map.get(expo_it, "mixed"))
     M_alt   = altitude_multiplier(res.get("avg_alt_m"))
     M_tech  = technique_multiplier(technique_level)
     M_load  = pack_load_multiplier(extra_load_kg)
@@ -365,169 +351,13 @@ def compute_if_from_res(res: dict,
             "M_tech": round(M_tech,2), "M_load": round(M_load,2),
             "cat": cat_from_if(round(IF,1))}
 
-# ---------------- Build PDF (usa backend disponibile) ----------------
-def build_pdf(res: dict, fi: dict, params: dict, conds: dict, gpx_name: str) -> bytes:
-    if PDF_BACKEND == "reportlab":
-        buf = io.BytesIO()
-        c = canvas.Canvas(buf, pagesize=A4)
-        W, H = A4; M = 36; x = M; y = H - M
-
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(x, y, _safe("Tempo percorrenza sentiero — Export PDF"))
-        c.setFont("Helvetica", 10)
-        c.drawString(x, y-14, _safe(f"Versione {APP_VER} — File: {gpx_name or 'GPX'}"))
-        y -= 28
-
-        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Risultati principali")
-        y -= 14; c.setFont("Helvetica", 10)
-        lines = [
-            f"Distanza: {res['tot_km']} km",
-            f"Dislivello +: {int(res['dplus'])} m   Dislivello -: {int(res['dneg'])} m",
-            f"Tempo totale: {fmt_hm(res['t_total'])}",
-            f"  • Piano: {fmt_hm(res['t_dist'])}   • Salita: {fmt_hm(res['t_up'])}   • Discesa: {fmt_hm(res['t_down'])}",
-            f"Calorie stimate: {res['cal_total']} kcal",
-            f"Buchi GPX: {int(res['holes'])}",
-            f"Lunghezze — Piano: {res['len_flat_km']:.2f} km, Salita: {res['len_up_km']:.2f} km, Discesa: {res['len_down_km']:.2f} km",
-            f"Pend. media — Salita: {res['grade_up_pct']:.1f} %, Discesa: {res['grade_down_pct']:.1f} %",
-        ]
-        for L in lines: c.drawString(x, y, _safe(L)); y -= 12
-
-        ab = [int(round(v)) for v in res["asc_bins_m"]]
-        db = [int(round(v)) for v in res["desc_bins_m"]]
-        y -= 4
-        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Fasce di pendenza (metri)")
-        y -= 14; c.setFont("Helvetica", 10)
-        c.drawString(x, y, _safe(f"Salita: <10% {ab[0]} m — 10–20% {ab[1]} m — 20–30% {ab[2]} m — 30–40% {ab[3]} m — >40% {ab[4]} m")); y -= 12
-        c.drawString(x, y, _safe(f"Discesa: <10% {db[0]} m — 10–20% {db[1]} m — 20–30% {db[2]} m — 30–40% {db[3]} m — >40% {db[4]} m")); y -= 18
-
-        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Indice di fatica")
-        y -= 14; c.setFont("Helvetica", 10)
-        c.drawString(x, y, _safe(f"IF: {fi['IF']} ({fi['cat']}) — IF base: {fi['IF_base']}"))
-        y -= 12
-        c.drawString(x, y, _safe(f"Meteo: {fi['M_meteo']}  • Alt: {fi['M_alt']}  • Tec: {fi['M_tech']}  • Zaino: {fi['M_load']}"))
-        y -= 18
-
-        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Parametri e condizioni")
-        y -= 14; c.setFont("Helvetica", 10)
-        p1 = f"Min/km (piano): {params['base']} — Min/100m salita: {params['up']} — Min/200m discesa: {params['down']} — Peso: {params['weight']} kg"
-        p2 = f"Inverti traccia: {'sì' if params['reverse'] else 'no'} — Zaino: {conds['loadkg']} kg — Tecnica: {conds['tech_it']}"
-        p3 = f"Met: T={conds['temp']} °C  U={conds['hum']} %  Vento={conds['wind']} km/h — Prec: {conds['precip_it']} — Fondo: {conds['surface_it']} — Esposizione: {conds['expo_it']}"
-        for L in (p1, p2, p3): c.drawString(x, y, _safe(L)); y -= 12
-
-        # Profilo altimetrico semplice
-        y -= 12
-        c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "Profilo altimetrico")
-        y -= 6
-        chart_h = 200
-        chart_w = A4[0] - 2*M
-        box_y = y - chart_h
-        c.setStrokeColor(colors.black)
-        c.rect(x, box_y, chart_w, chart_h, stroke=1, fill=0)
-
-        df = res["df_profile"]
-        if len(df) >= 2:
-            xs = df["km"].tolist(); ys = df["elev_m"].tolist()
-            y_min, y_max = min(ys), max(ys)
-            if y_max - y_min < 1: y_max = y_min + 1
-            x0, x1 = xs[0], xs[-1]
-            if x1 - x0 < 1e-6: x1 = x0 + 1e-6
-            def X(u): return x + ((u - x0)/(x1 - x0))*chart_w
-            def Y(v): return box_y + ((v - y_min)/(y_max - y_min))*chart_h
-            # griglia km
-            c.setStrokeColor(colors.lightgrey)
-            for k in range(int(math.floor(x0)), int(math.ceil(x1))+1):
-                gx = X(k); c.line(gx, box_y, gx, box_y+chart_h)
-            # traccia
-            c.setStrokeColor(colors.darkblue); c.setLineWidth(1)
-            px, py = X(xs[0]), Y(ys[0])
-            for u, v in zip(xs[1:], ys[1:]):
-                nx, ny = X(u), Y(v); c.line(px, py, nx, ny); px, py = nx, ny
-            c.setStrokeColor(colors.black); c.setLineWidth(0.5)
-            c.line(x, box_y, x+chart_w, box_y); c.line(x, box_y, x, box_y+chart_h)
-
-        c.showPage(); c.save()
-        return buf.getvalue()
-
-    if PDF_BACKEND == "fpdf2":
-        pdf = FPDF(unit="pt", format="A4")
-        pdf.add_page()
-        W, H = 595.27, 841.89; M = 36; x = M; y = H - M
-
-        pdf.set_font("Helvetica", "B", 16)
-        pdf.text(x, y, _safe("Tempo percorrenza sentiero — Export PDF"))
-        pdf.set_font("Helvetica", "", 10)
-        pdf.text(x, y-14, _safe(f"Versione {APP_VER} — File: {gpx_name or 'GPX'}"))
-        y -= 28
-
-        pdf.set_font("Helvetica", "B", 12); pdf.text(x, y, "Risultati principali"); y -= 14
-        pdf.set_font("Helvetica", "", 10)
-        lines = [
-            f"Distanza: {res['tot_km']} km",
-            f"Dislivello +: {int(res['dplus'])} m   Dislivello -: {int(res['dneg'])} m",
-            f"Tempo totale: {fmt_hm(res['t_total'])}",
-            f"  • Piano: {fmt_hm(res['t_dist'])}   • Salita: {fmt_hm(res['t_up'])}   • Discesa: {fmt_hm(res['t_down'])}",
-            f"Calorie stimate: {res['cal_total']} kcal",
-            f"Buchi GPX: {int(res['holes'])}",
-            f"Lunghezze — Piano: {res['len_flat_km']:.2f} km, Salita: {res['len_up_km']:.2f} km, Discesa: {res['len_down_km']:.2f} km",
-            f"Pend. media — Salita: {res['grade_up_pct']:.1f} %, Discesa: {res['grade_down_pct']:.1f} %",
-        ]
-        for L in lines: pdf.text(x, y, _safe(L)); y -= 12
-
-        ab = [int(round(v)) for v in res["asc_bins_m"]]
-        db = [int(round(v)) for v in res["desc_bins_m"]]
-        y -= 4
-        pdf.set_font("Helvetica", "B", 12); pdf.text(x, y, "Fasce di pendenza (metri)"); y -= 14
-        pdf.set_font("Helvetica", "", 10)
-        pdf.text(x, y, _safe(f"Salita: <10% {ab[0]} m — 10–20% {ab[1]} m — 20–30% {ab[2]} m — 30–40% {ab[3]} m — >40% {ab[4]} m")); y -= 12
-        pdf.text(x, y, _safe(f"Discesa: <10% {db[0]} m — 10–20% {db[1]} m — 20–30% {db[2]} m — 30–40% {db[3]} m — >40% {db[4]} m")); y -= 18
-
-        pdf.set_font("Helvetica", "B", 12); pdf.text(x, y, "Indice di fatica"); y -= 14
-        pdf.set_font("Helvetica", "", 10)
-        pdf.text(x, y, _safe(f"IF: {fi['IF']} ({fi['cat']}) — IF base: {fi['IF_base']}")); y -= 12
-        pdf.text(x, y, _safe(f"Meteo: {fi['M_meteo']}  • Alt: {fi['M_alt']}  • Tec: {fi['M_tech']}  • Zaino: {fi['M_load']}")); y -= 18
-
-        pdf.set_font("Helvetica", "B", 12); pdf.text(x, y, "Parametri e condizioni"); y -= 14
-        pdf.set_font("Helvetica", "", 10)
-        p1 = f"Min/km (piano): {params['base']} — Min/100m salita: {params['up']} — Min/200m discesa: {params['down']} — Peso: {params['weight']} kg"
-        p2 = f"Inverti traccia: {'sì' if params['reverse'] else 'no'} — Zaino: {conds['loadkg']} kg — Tecnica: {conds['tech_it']}"
-        p3 = f"Met: T={conds['temp']} °C  U={conds['hum']} %  Vento={conds['wind']} km/h — Prec: {conds['precip_it']} — Fondo: {conds['surface_it']} — Esposizione: {conds['expo_it']}"
-        for L in (p1, p2, p3): pdf.text(x, y, _safe(L)); y -= 12
-
-        # Profilo
-        y -= 12
-        pdf.set_font("Helvetica", "B", 12); pdf.text(x, y, "Profilo altimetrico"); y -= 6
-        chart_h = 200; chart_w = W - 2*M; box_y = y - chart_h
-        pdf.rect(x, box_y, chart_w, chart_h)
-
-        df = res["df_profile"]
-        if len(df) >= 2:
-            xs = df["km"].tolist(); ys = df["elev_m"].tolist()
-            y_min, y_max = min(ys), max(ys); 
-            if y_max - y_min < 1: y_max = y_min + 1
-            x0, x1 = xs[0], xs[-1]; 
-            if x1 - x0 < 1e-6: x1 = x0 + 1e-6
-            def X(u): return x + ((u - x0)/(x1 - x0))*chart_w
-            def Y(v): return box_y + ((v - y_min)/(y_max - y_min))*chart_h
-            # griglia km
-            km0, km1 = int(math.floor(x0)), int(math.ceil(x1))
-            for k in range(km0, km1+1):
-                gx = X(k); pdf.line(gx, box_y, gx, box_y+chart_h)
-            # traccia
-            px, py = X(xs[0]), Y(ys[0])
-            for u, v in zip(xs[1:], ys[1:]):
-                nx, ny = X(u), Y(v); pdf.line(px, py, nx, ny); px, py = nx, ny
-
-        return bytes(pdf.output(dest="S"))
-
-    raise RuntimeError("Nessun backend PDF disponibile (reportlab/fpdf2).")
-
 # ===================== UI Streamlit =====================
 st.set_page_config(page_title=APP_TITLE, page_icon="🗺️", layout="wide")
 st.title(f"{APP_TITLE} — {APP_VER}")
 
 ensure_defaults()
 
-# Barra superiore
+# Barra superiore: Carica + Calcola
 top = st.container()
 with top:
     c1, c2, c3 = st.columns([4, 1.2, 1])
@@ -535,10 +365,8 @@ with top:
     _recalc = c2.button("Calcola", use_container_width=True)
 
     file_bytes = None
-    gpx_name = None
     if gpx is not None:
         file_bytes = gpx.getvalue()
-        gpx_name = gpx.name
         sig = f"{gpx.name}|{len(file_bytes)}"
         if st.session_state.get("last_gpx_sig") != sig:
             st.session_state["last_gpx_sig"] = sig
@@ -548,14 +376,17 @@ with top:
     if gpx is not None:
         c3.caption(f"Selezionato: {gpx.name}")
 
-# Sidebar parametri
+# Sidebar impostazioni
 with st.sidebar:
     st.header("Impostazioni")
     base    = st.number_input("Min/km (piano)",     min_value=1.0, step=0.5, key="base")
     up      = st.number_input("Min/100 m (salita)", min_value=1.0, step=0.5, key="up")
     down    = st.number_input("Min/200 m (discesa)",min_value=1.0, step=0.5, key="down")
     weight  = st.number_input("Peso (kg)", min_value=30.0, step=1.0, key="weight")
-    reverse = st.checkbox("Inverti traccia", key="reverse")
+    reverse = st.checkbox(
+        "Inverti traccia", key="reverse",
+        help="Inverti l'ordine dei punti del GPX (utile se la traccia è registrata al contrario)."
+    )
 
     st.markdown("---")
     st.subheader("Condizioni")
@@ -571,9 +402,12 @@ with st.sidebar:
     expo_it = st.selectbox("Esposizione",
         ["ombra","misto","pieno sole"],
         key="expo_sel")
-    tech_it = st.selectbox("Tecnica",
-        ["facile","normale","roccioso","scrambling","neve/ghiaccio"],
-        key="tech_sel")
+    tech_it = st.selectbox(
+        "Tecnica",
+        ["facile","normale","roccioso","passaggi di roccia (scrambling)","neve/ghiaccio"],
+        key="tech_sel",
+        help="Livello tecnico richiesto: da sentiero facile fino a brevi passaggi su roccia (I°/II°) senza attrezzatura."
+    )
     loadkg = st.number_input("Zaino extra (kg)", step=1.0, min_value=0.0, key="loadkg")
 
 colL, colR = st.columns([1.15, 1])
@@ -587,19 +421,24 @@ else:
         st.error(str(e))
     else:
         with colL:
-            m1, m2, m3, m4 = st.columns(4)
+            # === Riga alta a 3 colonne: Distanza · D+ · Tempo totale ===
+            m1, m2, m3 = st.columns(3)
             m1.metric("Distanza (km)", res["tot_km"])
             m2.metric("Dislivello + (m)", int(res["dplus"]))
-            m3.metric("Dislivello − (m)", int(res["dneg"]))
-            m4.metric("Tempo totale", fmt_hm(res["t_total"]))
+            m3.metric("Tempo totale", fmt_hm(res["t_total"]))
 
+            # Seconda riga: D− + tempi parziali
             c1, c2, c3 = st.columns(3)
-            c1.markdown(f"**Tempo piano:** {fmt_hm(res['t_dist'])}")
-            c2.markdown(f"**Tempo salita:** {fmt_hm(res['t_up'])}")
-            c3.markdown(f"**Tempo discesa:** {fmt_hm(res['t_down'])}")
+            c1.metric("Dislivello − (m)", int(res["dneg"]))
+            c2.markdown(f"**Tempo piano:** {fmt_hm(res['t_dist'])}")
+            c3.markdown(f"**Tempo salita:** {fmt_hm(res['t_up'])}")
+            st.markdown(f"**Tempo discesa:** {fmt_hm(res['t_down'])}")
 
-            holes = int(res['holes'])
-            st.markdown("**Buchi GPX:** <span style='color:{}'>{}</span>".format("red" if holes>0 else "#0b0", holes), unsafe_allow_html=True)
+            # Buchi GPX con tooltip
+            st.metric(
+                "Buchi GPX", int(res['holes']),
+                help="Numero di salti di quota > 100 m tra due punti consecutivi (probabile buco nella registrazione)."
+            )
 
             c4, c5, c6 = st.columns(3)
             c4.markdown(f"**Piano:** {res['len_flat_km']:.2f} km")
@@ -640,27 +479,35 @@ else:
             )
             st.altair_chart(chart, use_container_width=True)
 
-            params = dict(base=base, up=up, down=down, weight=weight, reverse=reverse)
-            conds  = dict(temp=temp, hum=hum, wind=wind,
-                          precip_it=precip_it, surface_it=surface_it, expo_it=expo_it,
-                          tech_it=tech_it, loadkg=loadkg)
-
         with colR:
             st.subheader("Indice di Fatica")
             fi = compute_if_from_res(
                 res,
-                temp_c=float(temp), humidity_pct=float(hum),
-                precip=precip_it, surface=surface_it,
-                wind_kmh=float(wind), exposure=expo_it,
-                technique_level=tech_it, extra_load_kg=float(loadkg)
+                temp_c=float(st.session_state["temp"]), humidity_pct=float(st.session_state["hum"]),
+                precip_it=st.session_state["precip_sel"], surface_it=st.session_state["surface_sel"],
+                wind_kmh=float(st.session_state["wind"]), expo_it=st.session_state["expo_sel"],
+                technique_level=st.session_state["tech_sel"], extra_load_kg=float(st.session_state["loadkg"])
             )
-            st.metric("Indice di Fatica", f"{fi['IF']}  ({fi['cat']})")
-            st.caption(f"IF base: {fi['IF_base']}  ·  Meteo: {fi['M_meteo']}  ·  Alt: {fi['M_alt']}  ·  Tec: {fi['M_tech']}  ·  Zaino: {fi['M_load']}")
-            st.caption(f"LCS>=25: {res['lcs25_m']} m · Blocchi>=25: {res['blocks25_count']} · Surge: {res['surge_idx_per_km']}/km")
+            st.metric(
+                "Indice di Fatica",
+                f"{fi['IF']}  ({fi['cat']})",
+                help="0–30 Facile · 30–50 Medio · 50–70 Impegnativo · >70 Molto impegnativo"
+            )
 
-            # Download CSV profilo
+            # Metriche avanzate con tooltip
+            mL, mB, mS = st.columns(3)
+            mL.metric(
+                "LCS ≥25% (m)", res["lcs25_m"],
+                help="Lunghezza massima di tratto in SALITA con pendenza ≥ 25% senza interruzioni."
+            )
+            mB.metric(
+                "Blocchi ripidi (≥100 m @ ≥25%)", res["blocks25_count"],
+                help="Quanti segmenti in SALITA lunghi ≥100 m con pendenza ≥25%."
+            )
+            mS.metric(
+                "Surge (cambi ritmo)/km", res["surge_idx_per_km"],
+                help="Transizioni ripetute tra salita dolce (<15%) e salita ripida (≥25%) per chilometro."
+            )
+
             csv = res["df_profile"].to_csv(index=False).encode("utf-8")
             st.download_button("Scarica profilo (CSV)", csv, file_name="profilo_gpx.csv", mime="text/csv")
-
-            # Stampa / Salva come PDF tramite il browser
-st.caption("Suggerimento: per stampare o salvare come PDF usa il comando del browser (Ctrl+P / ⌘P).")
