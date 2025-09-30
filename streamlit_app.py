@@ -5,10 +5,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# Per il gauge semicircolare
-import matplotlib.pyplot as plt
-from matplotlib.patches import Wedge
-
 # Prova ad usare gpxpy, altrimenti fallback su XML
 try:
     import gpxpy  # type: ignore
@@ -40,7 +36,7 @@ W_STEEP, W_STEEP_D  = 0.4, 0.3
 W_LCS, W_BLOCKS, W_SURGE = 0.25, 0.15, 0.25
 IF_S0 = 80.0
 ALPHA_METEO = 0.6
-SEVERITY_GAIN = 1.52  # ~ +10% rispetto a 1.38
+SEVERITY_GAIN = 1.52  # ~ +10% rispetto alla versione precedente
 
 # Opzioni (IT)
 PRECIP_OPTIONS = ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"]
@@ -199,7 +195,7 @@ def parse_gpx(uploaded_file) -> pd.DataFrame:
     df["dist_m"] = dist
     return df
 
-# ========== Motore di calcolo identico al desktop ==========
+# ========== Motore di calcolo ==========
 def compute_from_arrays(lat, lon, ele_raw,
                         base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
                         weight_kg=70.0, reverse=False):
@@ -340,46 +336,36 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     else: cat="Estremo"
     return {"IF": IF, "cat": cat}
 
-# ========== Gauge semicircolare ==========
-def draw_gauge(score: float):
-    # bins (uguali al desktop)
-    bins = [
-        (0,30,"#2ecc71","Facile"),
-        (30,50,"#f1c40f","Medio"),
-        (50,70,"#e67e22","Impeg."),
-        (70,80,"#e74c3c","Diffic."),
-        (80,90,"#8e44ad","Molto diff."),
-        (90,100,"#111111","Estremo"),
-    ]
-    fig, ax = plt.subplots(figsize=(6.2,2.8))
-    ax.set_xlim(-1.1,1.1); ax.set_ylim(-0.15,1.15); ax.axis("off")
-    # arco colorato
-    for a,b,col,_ in bins:
-        th1 = 180 - (a/100.0)*180.0
-        th2 = 180 - (b/100.0)*180.0
-        ax.add_patch(Wedge((0,0),1.0, th2, th1, width=0.25, color=col, ec=col))
-    # tacche 0-50-100
-    for v in (0,50,100):
-        ang = math.radians(180 - (v/100.0)*180.0)
-        x1,y1 = 0.75*math.cos(ang), 0.75*math.sin(ang)
-        x2,y2 = 1.05*math.cos(ang), 1.05*math.sin(ang)
-        ax.plot([x1,x2],[y1,y2], color="#666", lw=1)
-        xt, yt = 1.12*math.cos(ang), 1.12*math.sin(ang)
-        ax.text(xt, yt, f"{v}", ha="center", va="center", fontsize=9, color="#444")
-    # etichette categorie
-    for a,b,_,lab in bins:
-        m=(a+b)/2.0; ang=math.radians(180 - (m/100.0)*180.0)
-        xt, yt = 0.85*math.cos(ang), 0.85*math.sin(ang)
-        ax.text(xt, yt, lab, ha="center", va="center", fontsize=9, fontweight="bold", color="#111")
-    # ago
-    s = max(0.0, min(100.0, score))
-    ang=math.radians(180 - (s/100.0)*180.0)
-    ax.plot([0, 0.65*math.cos(ang)], [0, 0.65*math.sin(ang)], lw=3, color="#333")
-    ax.add_patch(plt.Circle((0,0), 0.035, color="#333"))
-    # valore
-    ax.text(0, -0.02, f"{s:.1f}", ha="center", va="top", fontsize=14, fontweight="bold")
-    plt.tight_layout()
-    return fig
+# ========== Gauge Altair (senza Matplotlib) ==========
+def draw_gauge_altair(score: float):
+    """
+    Semicerchio a settori (donut) con testo centrale.
+    """
+    score = float(np.clip(score, 0, 100))
+
+    seg = pd.DataFrame({
+        "label": ["Facile", "Medio", "Impeg.", "Diffic.", "Molto diff.", "Estremo"],
+        "value": [30, 20, 20, 10, 10, 10],
+        "color": ["#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#8e44ad", "#111111"]
+    })
+
+    arc = alt.Chart(seg).mark_arc(
+        innerRadius=60, outerRadius=100,
+        startAngle=-np.pi, endAngle=0
+    ).encode(
+        theta=alt.Theta("value:Q", stack=True),
+        color=alt.Color("label:N", scale=alt.Scale(range=seg["color"].tolist()), legend=None)
+    ).properties(height=220)
+
+    lab = cat_from_if(score)
+    text = alt.Chart(pd.DataFrame({"t":[f"{score:.1f}"]})).mark_text(
+        font="Segoe UI", fontSize=22, fontWeight="bold", dy=-10
+    ).encode(text="t:N")
+    text2 = alt.Chart(pd.DataFrame({"t":[f"({lab})"]})).mark_text(
+        font="Segoe UI", fontSize=14, dy=20
+    ).encode(text="t:N")
+
+    return (arc + text + text2)
 
 # ========== UI ==========
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
@@ -388,13 +374,10 @@ st.title(APP_TITLE)
 # uploader e reset dei parametri quando cambia file
 uploaded = st.file_uploader("📂 Carica GPX", type=["gpx"])
 if "gpx_name" not in st.session_state: st.session_state.gpx_name = None
-file_changed = False
 if uploaded is not None and uploaded.name != st.session_state.gpx_name:
     st.session_state.gpx_name = uploaded.name
-    # reset parametri a default
     for k,v in DEFAULTS.items():
-        st.session_state[k] = v
-    file_changed = True
+        st.session_state[k] = v  # reset a default
 
 # pannello parametri
 with st.sidebar:
@@ -427,7 +410,7 @@ if uploaded is None:
     k2.metric("Dislivello + (m)", "-")
     k3.metric("Tempo totale", "-")
     st.subheader("Indice di Difficoltà")
-    st.pyplot(draw_gauge(0.0), use_container_width=True)
+    st.altair_chart(draw_gauge_altair(0.0), use_container_width=True)
 else:
     df = parse_gpx(uploaded)
     if df.empty or df["ele"].isna().all():
@@ -439,7 +422,7 @@ else:
         # KPI
         k1.metric("Distanza (km)", f"{res['tot_km']:.2f}")
         k2.metric("Dislivello + (m)", f"{int(res['dplus'])}")
-        # tempo totale h:mm
+
         def fmt_hm(minutes):
             h=int(minutes//60); m=int(round(minutes-h*60))
             if m==60: h+=1; m=0
@@ -478,7 +461,7 @@ else:
         )
         st.subheader("Indice di Difficoltà")
         st.markdown(f"**{fi['IF']}  ({fi['cat']})**")
-        st.pyplot(draw_gauge(fi["IF"]), use_container_width=True)
+        st.altair_chart(draw_gauge_altair(fi["IF"]), use_container_width=True)
 
         # Profilo altimetrico
         st.subheader("Profilo altimetrico")
