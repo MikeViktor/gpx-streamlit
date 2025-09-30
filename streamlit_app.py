@@ -337,35 +337,64 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     return {"IF": IF, "cat": cat}
 
 # ========== Gauge Altair (senza Matplotlib) ==========
+import pandas as pd
+import numpy as np
+import altair as alt
+
 def draw_gauge_altair(score: float):
     """
-    Semicerchio a settori (donut) con testo centrale.
+    Gauge semicircolare con Altair senza Matplotlib.
+    Usa i canali theta/theta2 (in gradi) per definire gli archi.
     """
     score = float(np.clip(score, 0, 100))
 
+    # Segmenti e colori (come desktop)
     seg = pd.DataFrame({
         "label": ["Facile", "Medio", "Impeg.", "Diffic.", "Molto diff.", "Estremo"],
         "value": [30, 20, 20, 10, 10, 10],
         "color": ["#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#8e44ad", "#111111"]
     })
 
-    arc = alt.Chart(seg).mark_arc(
-        innerRadius=60, outerRadius=100,
-        startAngle=-np.pi, endAngle=0
-    ).encode(
-        theta=alt.Theta("value:Q", stack=True),
-        color=alt.Color("label:N", scale=alt.Scale(range=seg["color"].tolist()), legend=None)
-    ).properties(height=220)
+    # Calcolo start/end in GRADI per un semicerchio (0°..180°)
+    total = seg["value"].sum()
+    seg["frac"] = seg["value"] / total
+    seg["cum"] = seg["frac"].cumsum()
+    seg["startDeg"] = (seg["cum"] - seg["frac"]) * 180.0
+    seg["endDeg"]   = seg["cum"] * 180.0
+
+    arcs = (
+        alt.Chart(seg)
+        .mark_arc(innerRadius=60, outerRadius=100)
+        .encode(
+            theta=alt.Theta("startDeg:Q", title=None),
+            theta2=alt.Theta2("endDeg:Q"),
+            color=alt.Color("label:N",
+                            scale=alt.Scale(range=seg["color"].tolist()),
+                            legend=None)
+        )
+        .properties(height=220)
+    )
+
+    # Testo centrale: valore e categoria
+    def cat_from_if(v):
+        if v < 30: return "Facile"
+        if v < 50: return "Medio"
+        if v < 70: return "Impegnativo"
+        if v < 80: return "Difficile"
+        if v <= 90: return "Molto diff."
+        return "Estremo"
 
     lab = cat_from_if(score)
-    text = alt.Chart(pd.DataFrame({"t":[f"{score:.1f}"]})).mark_text(
+
+    center_val = alt.Chart(pd.DataFrame({"t":[f"{score:.1f}"]})).mark_text(
         font="Segoe UI", fontSize=22, fontWeight="bold", dy=-10
     ).encode(text="t:N")
-    text2 = alt.Chart(pd.DataFrame({"t":[f"({lab})"]})).mark_text(
+
+    center_lab = alt.Chart(pd.DataFrame({"t":[f"({lab})"]})).mark_text(
         font="Segoe UI", fontSize=14, dy=20
     ).encode(text="t:N")
 
-    return (arc + text + text2)
+    return arcs + center_val + center_lab
 
 # ========== UI ==========
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
