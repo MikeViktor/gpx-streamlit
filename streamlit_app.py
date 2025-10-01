@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# ---- gpxpy se disponibile, altrimenti fallback XML ----
+# ---- gpxpy (se presente), altrimenti fallback XML ----
 try:
     import gpxpy  # type: ignore
     HAS_GPXPY = True
@@ -16,7 +16,7 @@ except Exception:
 APP_TITLE = "Analisi Tracce GPX"
 APP_ICON  = "⛰️"
 
-# ======= Costanti di calcolo =======
+# ======= Parametri calcolo =======
 RS_STEP_M     = 3.0
 RS_MIN_DELEV  = 0.25
 RS_MED_K      = 3
@@ -44,7 +44,8 @@ DEFAULTS = dict(
     base=15.0, up=15.0, down=15.0, weight=70.0, reverse=False,
     temp=15.0, hum=50.0, wind=5.0,
     precip="assenza pioggia", surface="asciutto",
-    expo="misto", tech="normale", loadkg=6.0
+    expo="misto", tech="normale", loadkg=6.0,
+    prof_scale=1.0
 )
 
 # ===== Utility =====
@@ -95,7 +96,6 @@ def apply_loop_drift_correction(elev_series, lat, lon, min_abs=DRIFT_MIN_ABS_M):
     fixed = [elev_series[i] - (drift * (i/n)) for i in range(len(elev_series))]
     return fixed, True, drift
 
-# ==== Meteo/tecnica ====
 def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
     if   temp_c < -5: M_temp = 1.20
     elif temp_c < 0:  M_temp = 1.10
@@ -107,20 +107,17 @@ def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
     else: M_temp = 1.35
     if   humidity_pct > 80: M_temp += 0.10
     elif humidity_pct > 60: M_temp += 0.05
-
     precip_map  = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}
     surface_map = {"dry":1.00,"mud":1.10,"wet_rock":1.15,"hard_snow":1.30,"ice":1.60}
     exposure_map= {"shade":1.00,"mixed":1.05,"sun":1.10}
     M_precip  = precip_map.get(precip,1.0)
     M_surface = surface_map.get(surface,1.0)
     M_sun     = exposure_map.get(exposure,1.0)
-
     if   wind_kmh <= 10: M_wind = 1.00
     elif wind_kmh <= 20: M_wind = 1.05
     elif wind_kmh <= 35: M_wind = 1.10
     elif wind_kmh <= 60: M_wind = 1.20
     else: M_wind = 1.35
-
     return min(1.4, M_temp * max(M_precip, M_surface) * M_wind * M_sun)
 
 def altitude_multiplier(avg_alt_m):
@@ -152,7 +149,7 @@ def parse_gpx(uploaded_file) -> pd.DataFrame:
         gpx = gpxpy.parse(io.StringIO(text))
         pts = []
         for trk in gpx.tracks:
-            for seg in trk.segments:
+            for seg in trk.sements:
                 for p in seg.points:
                     if p.elevation is None: continue
                     pts.append((p.latitude, p.longitude, float(p.elevation)))
@@ -189,7 +186,7 @@ def parse_gpx(uploaded_file) -> pd.DataFrame:
     df["dist_m"] = dist
     return df
 
-# ==== Motore di calcolo ====
+# ==== Motore calcolo (come prima) ====
 def compute_from_arrays(lat, lon, ele_raw,
                         base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
                         weight_kg=70.0, reverse=False):
@@ -318,46 +315,39 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     bump = (100.0 - IF_base) * max(0.0, (M - 1.0)) * ALPHA_METEO
     IF = min(100.0, (IF_base + bump) * SEVERITY_GAIN)
     IF = round(IF,1)
+    return {"IF": IF, "cat": cat_from_if(IF)}
 
-    if   IF < 30: cat="Facile"
-    elif IF < 50: cat="Medio"
-    elif IF < 70: cat="Impegnativo"
-    elif IF < 80: cat="Difficile"
-    elif IF <= 90: cat="Molto difficile"
-    else: cat="Estremo"
-    return {"IF": IF, "cat": cat}
-
-# ==== Gauge SVG (semicerchio + lancetta, 100% affidabile) ====
+# ==== Gauge SVG corretto (semicerchio + lancetta) ====
 def _pt(cx, cy, r, deg):
-    # 0° a destra; semicerchio: 180° (sinistra) → 0° (destra)
+    # deg: 180 (sinistra) → 0 (destra), sistema SVG (y verso il basso)
     rad = math.radians(180 - deg)
     return cx + r*math.cos(rad), cy - r*math.sin(rad)
 
 def _ring_segment_path(cx, cy, r_out, r_in, a0, a1):
-    # path ad anello tra angoli a0..a1 (in gradi)
+    # arco esterno da a0→a1 (a0>a1; es: 180→0), sweep=1 (verso destra)
     x0,y0 = _pt(cx,cy,r_out,a0); x1,y1 = _pt(cx,cy,r_out,a1)
     xi,yi = _pt(cx,cy,r_in ,a1); xo,yo = _pt(cx,cy,r_in ,a0)
-    large = 1 if (a1 - a0) > 180 else 0
-    p = []
-    p.append(f"M {x0:.2f},{y0:.2f}")
-    p.append(f"A {r_out:.2f},{r_out:.2f} 0 {large} 0 {x1:.2f},{y1:.2f}")
-    p.append(f"L {xi:.2f},{yi:.2f}")
-    p.append(f"A {r_in:.2f},{r_in:.2f} 0 {large} 1 {xo:.2f},{yo:.2f}")
-    p.append("Z")
-    return " ".join(p)
+    large = 1 if abs(a0-a1) > 180 else 0
+    path = []
+    path.append(f"M {x0:.2f},{y0:.2f}")
+    path.append(f"A {r_out:.2f},{r_out:.2f} 0 {large} 1 {x1:.2f},{y1:.2f}")  # sweep=1
+    path.append(f"L {xi:.2f},{yi:.2f}")
+    path.append(f"A {r_in:.2f},{r_in:.2f} 0 {large} 0 {xo:.2f},{yo:.2f}")   # sweep opposto
+    path.append("Z")
+    return " ".join(path)
 
 def draw_gauge_svg(score: float):
     score = float(np.clip(score,0,100))
-    cx, cy = 300, 240
+    cx, cy = 300, 230
     r_out, r_in = 200, 140
-    # segmenti in percento → gradi
-    segs = [
+
+    segments = [
         ("#2ecc71", 0, 30), ("#f1c40f", 30, 50), ("#e67e22", 50, 70),
         ("#e74c3c", 70, 80), ("#8e44ad", 80, 90), ("#111111", 90, 100)
     ]
     paths = []
-    for col, p0, p1 in segs:
-        a0 = 180*(p0/100); a1 = 180*(p1/100)
+    for col, p0, p1 in segments:
+        a0 = 180*(p0/100); a1 = 180*(p1/100)     # 180→0
         d = _ring_segment_path(cx,cy,r_out,r_in,a0,a1)
         paths.append(f'<path d="{d}" fill="{col}" stroke="#fff" stroke-width="2"/>')
 
@@ -367,25 +357,11 @@ def draw_gauge_svg(score: float):
     needle = f'<line x1="{cx}" y1="{cy}" x2="{xN:.1f}" y2="{yN:.1f}" stroke="#000" stroke-width="4"/>'
     hub    = f'<circle cx="{cx}" cy="{cy}" r="6" fill="#000"/>'
 
-    # testi
-    def cat(v):
-        if v < 30: return "Facile"
-        if v < 50: return "Medio"
-        if v < 70: return "Impegnativo"
-        if v < 80: return "Difficile"
-        if v <= 90: return "Molto diff."
-        return "Estremo"
-    txt = f'''
-    <text x="{cx}" y="{cy-12}" text-anchor="middle" font-family="Segoe UI" font-size="22" font-weight="700">{score:.1f}</text>
-    <text x="{cx}" y="{cy+12}" text-anchor="middle" font-family="Segoe UI" font-size="14">{cat(score)}</text>
-    '''
-
     svg = f'''
-    <svg width="100%" height="260" viewBox="0 0 600 260" xmlns="http://www.w3.org/2000/svg">
+    <svg width="100%" height="250" viewBox="0 0 600 250" xmlns="http://www.w3.org/2000/svg">
       <rect width="100%" height="100%" fill="transparent"/>
       {''.join(paths)}
       {needle}{hub}
-      {txt}
     </svg>
     '''
     return svg
@@ -417,6 +393,9 @@ with st.sidebar:
     expo = st.selectbox("Esposizione", EXPO_OPTIONS, index=EXPO_OPTIONS.index(st.session_state.get("expo","misto")), key="expo")
     tech = st.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(st.session_state.get("tech","normale")), key="tech")
     loadkg = st.number_input("Zaino extra (kg)", 0.0, 40.0, value=st.session_state.get("loadkg", 6.0), key="loadkg")
+
+    st.markdown("### Profilo")
+    prof_scale = st.slider("Scala verticale profilo", 0.6, 1.6, value=float(st.session_state.get("prof_scale",1.0)), step=0.05, key="prof_scale")
 
 k1, k2, k3 = st.columns(3)
 
@@ -476,13 +455,14 @@ else:
 
         st.subheader("Profilo altimetrico")
         prof = pd.DataFrame({"km":res["profile_x_km"], "elev":res["profile_y_m"]})
-        # altezza maggiore + larghezza fissa (meno “steso”) + margini Y
         y_min = float(np.min(prof["elev"])) - 60
         y_max = float(np.max(prof["elev"])) + 60
+        base_height = 520
+        height = int(base_height * float(prof_scale))
         chart = alt.Chart(prof).mark_line(strokeWidth=2.8).encode(
             x=alt.X("km:Q", title="Distanza (km)"),
             y=alt.Y("elev:Q", title="Quota (m)", scale=alt.Scale(domain=[y_min, y_max]))
-        ).properties(width=900, height=520)   # <— meno allungato
+        ).properties(width=900, height=height)
         st.altair_chart(chart, use_container_width=False)
 
         msgs=[]
