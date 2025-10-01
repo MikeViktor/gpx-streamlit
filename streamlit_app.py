@@ -337,67 +337,77 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     return {"IF": IF, "cat": cat}
 
 # ========== Gauge Altair (senza Matplotlib) ==========
-import pandas as pd
 import numpy as np
+import pandas as pd
 import altair as alt
 
 def draw_gauge_altair(score: float):
     """
-    Gauge SEMICIRCOLARE con Altair, colori in ordine e lancetta.
-    Niente Matplotlib. Funziona su Streamlit Cloud.
+    Gauge SEMICIRCOLARE con Altair:
+    - 180 micro-archi (1°) colorati per fascia
+    - Lancetta nera
+    - Foro centrale (donut)
+    Funziona ovunque senza Matplotlib.
     """
     score = float(np.clip(score, 0, 100))
 
-    # Segmenti e colori (come desktop): 0-30, 30-50, 50-70, 70-80, 80-90, 90-100
-    seg = pd.DataFrame({
-        "label": ["Facile", "Medio", "Impeg.", "Diffic.", "Molto diff.", "Estremo"],
-        "value": [30, 20, 20, 10, 10, 10],
-        "color": ["#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#8e44ad", "#111111"]
+    # Mappa colori e dominio (ordine fisso)
+    color_domain = ["Facile", "Medio", "Impeg.", "Diffic.", "Molto diff.", "Estremo"]
+    color_range  = ["#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#8e44ad", "#111111"]
+
+    # 0..179 gradi => 180 micro-archi da 1°
+    deg = np.arange(0, 180, 1)
+    df = pd.DataFrame({
+        "startDeg": deg.astype(float),
+        "endDeg":   (deg + 1).astype(float)
     })
 
-    total = seg["value"].sum()
-    seg["frac"] = seg["value"] / total
-    seg["cum"] = seg["frac"].cumsum()
-    # Semicerchio: 0° (sinistra) → 180° (destra)
-    seg["startDeg"] = (seg["cum"] - seg["frac"]) * 180.0
-    seg["endDeg"]   = seg["cum"] * 180.0
+    # Etichetta fascia in base alla "percentuale" corrispondente all'angolo
+    # (0°->0, 180°->100)
+    def label_for_deg(d):
+        v = d / 180.0 * 100.0
+        if v < 30:  return "Facile"
+        if v < 50:  return "Medio"
+        if v < 70:  return "Impeg."
+        if v < 80:  return "Diffic."
+        if v <= 90: return "Molto diff."
+        return "Estremo"
 
-    # Archi della scala (donut)
+    df["label"] = [label_for_deg(d) for d in deg]
+
+    # Arco del quadrante (semicerchio)
     arcs = (
-        alt.Chart(seg)
+        alt.Chart(df)
         .mark_arc(innerRadius=60, outerRadius=100)
         .encode(
-            theta=alt.Theta("startDeg:Q"),
-            theta2=alt.Theta2("endDeg:Q"),
-            color=alt.Color("label:N",
-                            scale=alt.Scale(range=seg["color"].tolist()),
-                            legend=None)
+            theta = alt.Theta("startDeg:Q"),
+            theta2= alt.Theta2("endDeg:Q"),
+            color = alt.Color("label:N",
+                              scale=alt.Scale(domain=color_domain, range=color_range),
+                              legend=None)
         )
         .properties(height=240)
     )
 
-    # LANCETTA: un arco sottilissimo dal centro verso il bordo
-    needle_deg = (score/100.0)*180.0
-    needle_df = pd.DataFrame({
-        "start":[max(0.0, needle_deg-0.7)],
-        "end":[min(180.0, needle_deg+0.7)]
-    })
+    # Lancetta (sottilissimo arco centrato sull'angolo del punteggio)
+    needle_deg = score / 100.0 * 180.0
+    needle_df = pd.DataFrame({"start":[max(0.0, needle_deg-0.7)],
+                              "end":[min(180.0, needle_deg+0.7)]})
     needle = (
         alt.Chart(needle_df)
         .mark_arc(innerRadius=0, outerRadius=100, color="#000000")
         .encode(theta="start:Q", theta2="end:Q")
     )
 
-    # MASCHERA metà inferiore (per ottenere il semicerchio)
-    mask_df = pd.DataFrame({"start":[180.0], "end":[360.0]})
-    mask = (
-        alt.Chart(mask_df)
-        .mark_arc(innerRadius=0, outerRadius=110, color="#ffffff")  # colore = sfondo
+    # Foro centrale (per avere il donut pulito)
+    hole = (
+        alt.Chart(pd.DataFrame({"start":[0.0], "end":[360.0]}))
+        .mark_arc(innerRadius=0, outerRadius=56, color="#ffffff")
         .encode(theta="start:Q", theta2="end:Q")
     )
 
-    # Testi centrali
-    def _cat(v):
+    # Testo centrale: valore + categoria
+    def cat_from_if(v):
         if v < 30: return "Facile"
         if v < 50: return "Medio"
         if v < 70: return "Impegnativo"
@@ -405,23 +415,24 @@ def draw_gauge_altair(score: float):
         if v <= 90: return "Molto diff."
         return "Estremo"
 
-    lab = _cat(score)
+    lab = cat_from_if(score)
 
-    center_val = alt.Chart(pd.DataFrame({"t":[f"{score:.1f}"]})).mark_text(
+    txt_val = alt.Chart(pd.DataFrame({"t":[f"{score:.1f}"]})).mark_text(
         font="Segoe UI", fontSize=22, fontWeight="bold", dy=-8
     ).encode(text="t:N")
 
-    center_lab = alt.Chart(pd.DataFrame({"t":[f"({lab})"]})).mark_text(
+    txt_lab = alt.Chart(pd.DataFrame({"t":[f"({lab})"]})).mark_text(
         font="Segoe UI", fontSize=14, dy=18
     ).encode(text="t:N")
 
-    # Piccolo tick a 50 per riferimento visivo
+    # Piccolo riferimento a 50 (90°)
     tick50 = pd.DataFrame({"start":[90-0.6], "end":[90+0.6]})
     tick = alt.Chart(tick50).mark_arc(innerRadius=84, outerRadius=100, color="#666").encode(
         theta="start:Q", theta2="end:Q"
     )
 
-    return (arcs + tick + needle + mask + center_val + center_lab).configure_view(strokeWidth=0)
+    return (arcs + tick + needle + hole + txt_val + txt_lab).configure_view(strokeWidth=0)
+
 
 
 # ========== UI ==========
@@ -523,10 +534,11 @@ else:
         # Profilo altimetrico
         st.subheader("Profilo altimetrico")
         prof = pd.DataFrame({"km":res["profile_x_km"], "elev":res["profile_y_m"]})
-        chart = alt.Chart(prof).mark_line().encode(
-            x=alt.X("km:Q", title="Distanza (km)"),
-            y=alt.Y("elev:Q", title="Quota (m)")
-        ).properties(height=320).interactive()
+        chart = alt.Chart(prof).mark_line(strokeWidth=2.2).encode(
+                        x=alt.X("km:Q", title="Distanza (km)"),
+                        y=alt.Y("elev:Q", title="Quota (m)")
+                  ).properties(height=460)   # alza quanto preferisci
+
         st.altair_chart(chart, use_container_width=True)
 
         # note su correzioni anello
