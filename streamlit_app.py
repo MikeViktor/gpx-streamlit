@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# ---- gpxpy (se presente), altrimenti fallback XML ----
+# ---- gpxpy se disponibile ----
 try:
     import gpxpy  # type: ignore
     HAS_GPXPY = True
@@ -16,7 +16,7 @@ except Exception:
 APP_TITLE = "Analisi Tracce GPX"
 APP_ICON  = "⛰️"
 
-# ======= Parametri calcolo =======
+# ====== Parametri ======
 RS_STEP_M     = 3.0
 RS_MIN_DELEV  = 0.25
 RS_MED_K      = 3
@@ -33,7 +33,7 @@ W_STEEP, W_STEEP_D  = 0.4, 0.3
 W_LCS, W_BLOCKS, W_SURGE = 0.25, 0.15, 0.25
 IF_S0 = 80.0
 ALPHA_METEO = 0.6
-SEVERITY_GAIN = 1.52  # ~ +10%
+SEVERITY_GAIN = 1.52
 
 PRECIP_OPTIONS = ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"]
 SURF_OPTIONS   = ["asciutto","fango","roccia bagnata","neve dura","ghiaccio"]
@@ -110,14 +110,14 @@ def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
     precip_map  = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}
     surface_map = {"dry":1.00,"mud":1.10,"wet_rock":1.15,"hard_snow":1.30,"ice":1.60}
     exposure_map= {"shade":1.00,"mixed":1.05,"sun":1.10}
-    M_precip  = precip_map.get(precip,1.0)
-    M_surface = surface_map.get(surface,1.0)
-    M_sun     = exposure_map.get(exposure,1.0)
     if   wind_kmh <= 10: M_wind = 1.00
     elif wind_kmh <= 20: M_wind = 1.05
     elif wind_kmh <= 35: M_wind = 1.10
     elif wind_kmh <= 60: M_wind = 1.20
     else: M_wind = 1.35
+    M_precip  = precip_map.get(precip,1.0)
+    M_surface = surface_map.get(surface,1.0)
+    M_sun     = exposure_map.get(exposure,1.0)
     return min(1.4, M_temp * max(M_precip, M_surface) * M_wind * M_sun)
 
 def altitude_multiplier(avg_alt_m):
@@ -149,7 +149,7 @@ def parse_gpx(uploaded_file) -> pd.DataFrame:
         gpx = gpxpy.parse(io.StringIO(text))
         pts = []
         for trk in gpx.tracks:
-            for seg in trk.sements:
+            for seg in trk.segments:
                 for p in seg.points:
                     if p.elevation is None: continue
                     pts.append((p.latitude, p.longitude, float(p.elevation)))
@@ -186,7 +186,7 @@ def parse_gpx(uploaded_file) -> pd.DataFrame:
     df["dist_m"] = dist
     return df
 
-# ==== Motore calcolo (come prima) ====
+# ==== Motore calcolo (identico alla versione precedente) ====
 def compute_from_arrays(lat, lon, ele_raw,
                         base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
                         weight_kg=70.0, reverse=False):
@@ -317,39 +317,75 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     IF = round(IF,1)
     return {"IF": IF, "cat": cat_from_if(IF)}
 
-# ==== Gauge SVG corretto (semicerchio + lancetta) ====
+# ===== Gauge SVG con etichette =====
 def _pt(cx, cy, r, deg):
-    # deg: 180 (sinistra) → 0 (destra), sistema SVG (y verso il basso)
     rad = math.radians(180 - deg)
     return cx + r*math.cos(rad), cy - r*math.sin(rad)
 
+def _arc_path(cx, cy, r, a0, a1, sweep=1):
+    x0,y0 = _pt(cx,cy,r,a0); x1,y1 = _pt(cx,cy,r,a1)
+    large = 1 if abs(a0-a1) > 180 else 0
+    return f"M {x0:.2f},{y0:.2f} A {r:.2f},{r:.2f} 0 {large} {sweep} {x1:.2f},{y1:.2f}"
+
 def _ring_segment_path(cx, cy, r_out, r_in, a0, a1):
-    # arco esterno da a0→a1 (a0>a1; es: 180→0), sweep=1 (verso destra)
     x0,y0 = _pt(cx,cy,r_out,a0); x1,y1 = _pt(cx,cy,r_out,a1)
     xi,yi = _pt(cx,cy,r_in ,a1); xo,yo = _pt(cx,cy,r_in ,a0)
     large = 1 if abs(a0-a1) > 180 else 0
-    path = []
-    path.append(f"M {x0:.2f},{y0:.2f}")
-    path.append(f"A {r_out:.2f},{r_out:.2f} 0 {large} 1 {x1:.2f},{y1:.2f}")  # sweep=1
-    path.append(f"L {xi:.2f},{yi:.2f}")
-    path.append(f"A {r_in:.2f},{r_in:.2f} 0 {large} 0 {xo:.2f},{yo:.2f}")   # sweep opposto
-    path.append("Z")
-    return " ".join(path)
+    return " ".join([
+        f"M {x0:.2f},{y0:.2f}",
+        f"A {r_out:.2f},{r_out:.2f} 0 {large} 1 {x1:.2f},{y1:.2f}",
+        f"L {xi:.2f},{yi:.2f}",
+        f"A {r_in:.2f},{r_in:.2f} 0 {large} 0 {xo:.2f},{yo:.2f}",
+        "Z"
+    ])
 
 def draw_gauge_svg(score: float):
     score = float(np.clip(score,0,100))
     cx, cy = 300, 230
     r_out, r_in = 200, 140
+    r_lab = r_out - 18  # raggio per etichette lungo arco
+    r_rad = r_out + 24  # raggio per etichette radiali
 
-    segments = [
-        ("#2ecc71", 0, 30), ("#f1c40f", 30, 50), ("#e67e22", 50, 70),
-        ("#e74c3c", 70, 80), ("#8e44ad", 80, 90), ("#111111", 90, 100)
+    # (label, colore, p0, p1, tipo)
+    segs = [
+        ("Facile"      , "#2ecc71", 0 , 30, "arc"),
+        ("Medio"       , "#f1c40f", 30, 50, "arc"),
+        ("Impegnativo" , "#e67e22", 50, 70, "arc"),
+        ("Difficile"   , "#e74c3c", 70, 80, "rad"),
+        ("Molto diff." , "#8e44ad", 80, 90, "rad"),
+        ("Estremo"     , "#111111", 90, 100,"rad"),
     ]
+
     paths = []
-    for col, p0, p1 in segments:
-        a0 = 180*(p0/100); a1 = 180*(p1/100)     # 180→0
+    defs  = []
+    texts = []
+
+    for idx,(lab,col,p0,p1,kind) in enumerate(segs):
+        a0 = 180*(p0/100); a1 = 180*(p1/100)
+        # settore colorato
         d = _ring_segment_path(cx,cy,r_out,r_in,a0,a1)
         paths.append(f'<path d="{d}" fill="{col}" stroke="#fff" stroke-width="2"/>')
+
+        if kind=="arc":
+            # etichetta “parallela” all’arco
+            d_lab = _arc_path(cx,cy,r_lab,a0,a1, sweep=1)
+            defs.append(f'<path id="lab{idx}" d="{d_lab}" fill="none" stroke="none"/>')
+            texts.append(
+                f'<text font-size="14" font-weight="600" fill="#222">'
+                f'<textPath href="#lab{idx}" startOffset="50%" text-anchor="middle">{lab}</textPath>'
+                f'</text>'
+            )
+        else:
+            # etichetta radiale
+            amid = (a0 + a1)/2.0
+            x,y = _pt(cx,cy,r_rad,amid)
+            rot = amid - 180  # radialmente verso l’esterno
+            fill = "#222" if col != "#111111" else "#222"
+            texts.append(
+                f'<text x="{x:.1f}" y="{y:.1f}" font-size="14" font-weight="700" fill="{fill}" '
+                f'text-anchor="middle" dominant-baseline="middle" '
+                f'transform="rotate({rot:.1f},{x:.1f},{y:.1f})">{lab}</text>'
+            )
 
     # lancetta
     aN = 180*(score/100.0)
@@ -358,15 +394,16 @@ def draw_gauge_svg(score: float):
     hub    = f'<circle cx="{cx}" cy="{cy}" r="6" fill="#000"/>'
 
     svg = f'''
-    <svg width="100%" height="250" viewBox="0 0 600 250" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100%" height="100%" fill="transparent"/>
+    <svg width="100%" height="260" viewBox="0 0 600 260" xmlns="http://www.w3.org/2000/svg">
+      <defs>{''.join(defs)}</defs>
       {''.join(paths)}
       {needle}{hub}
+      {''.join(texts)}
     </svg>
     '''
     return svg
 
-# ==== UI ====
+# ===== UI =====
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
 st.title(APP_TITLE)
 
@@ -395,7 +432,7 @@ with st.sidebar:
     loadkg = st.number_input("Zaino extra (kg)", 0.0, 40.0, value=st.session_state.get("loadkg", 6.0), key="loadkg")
 
     st.markdown("### Profilo")
-    prof_scale = st.slider("Scala verticale profilo", 0.6, 1.6, value=float(st.session_state.get("prof_scale",1.0)), step=0.05, key="prof_scale")
+    prof_scale = st.slider("Scala verticale profilo (Y)", 0.6, 1.6, value=float(st.session_state.get("prof_scale",1.0)), step=0.05, key="prof_scale")
 
 k1, k2, k3 = st.columns(3)
 
