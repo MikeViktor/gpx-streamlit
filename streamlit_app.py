@@ -16,7 +16,7 @@ except Exception:
 APP_TITLE = "Analisi Tracce GPX"
 APP_ICON  = "⛰️"
 
-# ======= Costanti di calcolo (come desktop) =======
+# ======= Costanti di calcolo =======
 RS_STEP_M     = 3.0
 RS_MIN_DELEV  = 0.25
 RS_MED_K      = 3
@@ -327,82 +327,68 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     else: cat="Estremo"
     return {"IF": IF, "cat": cat}
 
-# ==== Gauge Altair robusto (semicerchio + lancetta) ====
-def draw_gauge_altair(score: float):
-    """
-    180 micro-archi (1°) per garantire SEMICERCHIO ovunque.
-    Lancetta nera; foro centrale per donut.
-    """
-    score = float(np.clip(score, 0, 100))
+# ==== Gauge SVG (semicerchio + lancetta, 100% affidabile) ====
+def _pt(cx, cy, r, deg):
+    # 0° a destra; semicerchio: 180° (sinistra) → 0° (destra)
+    rad = math.radians(180 - deg)
+    return cx + r*math.cos(rad), cy - r*math.sin(rad)
 
-    color_domain = ["Facile", "Medio", "Impeg.", "Diffic.", "Molto diff.", "Estremo"]
-    color_range  = ["#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#8e44ad", "#111111"]
+def _ring_segment_path(cx, cy, r_out, r_in, a0, a1):
+    # path ad anello tra angoli a0..a1 (in gradi)
+    x0,y0 = _pt(cx,cy,r_out,a0); x1,y1 = _pt(cx,cy,r_out,a1)
+    xi,yi = _pt(cx,cy,r_in ,a1); xo,yo = _pt(cx,cy,r_in ,a0)
+    large = 1 if (a1 - a0) > 180 else 0
+    p = []
+    p.append(f"M {x0:.2f},{y0:.2f}")
+    p.append(f"A {r_out:.2f},{r_out:.2f} 0 {large} 0 {x1:.2f},{y1:.2f}")
+    p.append(f"L {xi:.2f},{yi:.2f}")
+    p.append(f"A {r_in:.2f},{r_in:.2f} 0 {large} 1 {xo:.2f},{yo:.2f}")
+    p.append("Z")
+    return " ".join(p)
 
-    deg = np.arange(0, 180, 1)
-    df = pd.DataFrame({"startDeg": deg.astype(float),
-                       "endDeg":   (deg + 1).astype(float)})
+def draw_gauge_svg(score: float):
+    score = float(np.clip(score,0,100))
+    cx, cy = 300, 240
+    r_out, r_in = 200, 140
+    # segmenti in percento → gradi
+    segs = [
+        ("#2ecc71", 0, 30), ("#f1c40f", 30, 50), ("#e67e22", 50, 70),
+        ("#e74c3c", 70, 80), ("#8e44ad", 80, 90), ("#111111", 90, 100)
+    ]
+    paths = []
+    for col, p0, p1 in segs:
+        a0 = 180*(p0/100); a1 = 180*(p1/100)
+        d = _ring_segment_path(cx,cy,r_out,r_in,a0,a1)
+        paths.append(f'<path d="{d}" fill="{col}" stroke="#fff" stroke-width="2"/>')
 
-    def label_for_deg(d):
-        v = d / 180.0 * 100.0
-        if v < 30:  return "Facile"
-        if v < 50:  return "Medio"
-        if v < 70:  return "Impeg."
-        if v < 80:  return "Diffic."
-        if v <= 90: return "Molto diff."
-        return "Estremo"
+    # lancetta
+    aN = 180*(score/100.0)
+    xN, yN = _pt(cx, cy, r_out, aN)
+    needle = f'<line x1="{cx}" y1="{cy}" x2="{xN:.1f}" y2="{yN:.1f}" stroke="#000" stroke-width="4"/>'
+    hub    = f'<circle cx="{cx}" cy="{cy}" r="6" fill="#000"/>'
 
-    df["label"] = [label_for_deg(d) for d in deg]
-
-    arcs = (
-        alt.Chart(df)
-        .mark_arc(innerRadius=60, outerRadius=100)
-        .encode(
-            theta = alt.Theta("startDeg:Q", stack=None),
-            theta2= alt.Theta2("endDeg:Q"),
-            color = alt.Color("label:N",
-                              scale=alt.Scale(domain=color_domain, range=color_range),
-                              legend=None)
-        )
-        .properties(height=240)
-    )
-
-    needle_deg = score / 100.0 * 180.0
-    needle_df = pd.DataFrame({"start":[max(0.0, needle_deg-0.7)],
-                              "end":[min(180.0, needle_deg+0.7)]})
-    needle = (
-        alt.Chart(needle_df)
-        .mark_arc(innerRadius=0, outerRadius=100, color="#000000")
-        .encode(theta="start:Q", theta2="end:Q")
-    )
-
-    hole = (
-        alt.Chart(pd.DataFrame({"start":[0.0], "end":[360.0]}))
-        .mark_arc(innerRadius=0, outerRadius=56, color="#ffffff")
-        .encode(theta="start:Q", theta2="end:Q")
-    )
-
-    def _cat(v):
+    # testi
+    def cat(v):
         if v < 30: return "Facile"
         if v < 50: return "Medio"
         if v < 70: return "Impegnativo"
         if v < 80: return "Difficile"
         if v <= 90: return "Molto diff."
         return "Estremo"
+    txt = f'''
+    <text x="{cx}" y="{cy-12}" text-anchor="middle" font-family="Segoe UI" font-size="22" font-weight="700">{score:.1f}</text>
+    <text x="{cx}" y="{cy+12}" text-anchor="middle" font-family="Segoe UI" font-size="14">{cat(score)}</text>
+    '''
 
-    lab = _cat(score)
-    txt_val = alt.Chart(pd.DataFrame({"t":[f"{score:.1f}"]})).mark_text(
-        font="Segoe UI", fontSize=22, fontWeight="bold", dy=-8
-    ).encode(text="t:N")
-    txt_lab = alt.Chart(pd.DataFrame({"t":[f"({lab})"]})).mark_text(
-        font="Segoe UI", fontSize=14, dy=18
-    ).encode(text="t:N")
-
-    tick50 = pd.DataFrame({"start":[90-0.6], "end":[90+0.6]})
-    tick = alt.Chart(tick50).mark_arc(innerRadius=84, outerRadius=100, color="#666").encode(
-        theta="start:Q", theta2="end:Q"
-    )
-
-    return (arcs + tick + needle + hole + txt_val + txt_lab).configure_view(strokeWidth=0)
+    svg = f'''
+    <svg width="100%" height="260" viewBox="0 0 600 260" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100%" height="100%" fill="transparent"/>
+      {''.join(paths)}
+      {needle}{hub}
+      {txt}
+    </svg>
+    '''
+    return svg
 
 # ==== UI ====
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
@@ -439,7 +425,7 @@ if uploaded is None:
     k2.metric("Dislivello + (m)", "-")
     k3.metric("Tempo totale", "-")
     st.subheader("Indice di Difficoltà")
-    st.altair_chart(draw_gauge_altair(0.0), use_container_width=True)
+    st.markdown(draw_gauge_svg(0.0), unsafe_allow_html=True)
 else:
     df = parse_gpx(uploaded)
     if df.empty or df["ele"].isna().all():
@@ -486,15 +472,18 @@ else:
         )
         st.subheader("Indice di Difficoltà")
         st.markdown(f"**{fi['IF']}  ({fi['cat']})**")
-        st.altair_chart(draw_gauge_altair(fi["IF"]), use_container_width=True)
+        st.markdown(draw_gauge_svg(fi["IF"]), unsafe_allow_html=True)
 
         st.subheader("Profilo altimetrico")
         prof = pd.DataFrame({"km":res["profile_x_km"], "elev":res["profile_y_m"]})
-        chart = alt.Chart(prof).mark_line(strokeWidth=2.4).encode(
+        # altezza maggiore + larghezza fissa (meno “steso”) + margini Y
+        y_min = float(np.min(prof["elev"])) - 60
+        y_max = float(np.max(prof["elev"])) + 60
+        chart = alt.Chart(prof).mark_line(strokeWidth=2.8).encode(
             x=alt.X("km:Q", title="Distanza (km)"),
-            y=alt.Y("elev:Q", title="Quota (m)")
-        ).properties(height=460)  # più alto per non essere "steso"
-        st.altair_chart(chart, use_container_width=True)
+            y=alt.Y("elev:Q", title="Quota (m)", scale=alt.Scale(domain=[y_min, y_max]))
+        ).properties(width=900, height=520)   # <— meno allungato
+        st.altair_chart(chart, use_container_width=False)
 
         msgs=[]
         if res.get("loop_fix_applied"): msgs.append(f"Corretta deriva ~{res['loop_drift_abs_m']} m")
