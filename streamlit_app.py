@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-# Prova ad usare gpxpy, altrimenti fallback su XML
+# ---- gpxpy se disponibile, altrimenti fallback XML ----
 try:
     import gpxpy  # type: ignore
     HAS_GPXPY = True
@@ -16,29 +16,25 @@ except Exception:
 APP_TITLE = "Analisi Tracce GPX"
 APP_ICON  = "⛰️"
 
-# ======= Costanti identiche al programma desktop =======
-# Ricampionamento / smoothing
+# ======= Costanti di calcolo (come desktop) =======
 RS_STEP_M     = 3.0
 RS_MIN_DELEV  = 0.25
 RS_MED_K      = 3
 RS_AVG_K      = 3
 ABS_JUMP_RAW  = 100.0
 
-# Chiusura anello & bilanciamento
 LOOP_TOL_M        = 200.0
 DRIFT_MIN_ABS_M   = 2.0
 BALANCE_MIN_DIFFM = 10.0
 BALANCE_REL_FRAC  = 0.05
 
-# Pesi Indice Difficoltà
 W_D, W_PLUS, W_COMP = 0.5, 1.0, 0.5
 W_STEEP, W_STEEP_D  = 0.4, 0.3
 W_LCS, W_BLOCKS, W_SURGE = 0.25, 0.15, 0.25
 IF_S0 = 80.0
 ALPHA_METEO = 0.6
-SEVERITY_GAIN = 1.52  # ~ +10% rispetto alla versione precedente
+SEVERITY_GAIN = 1.52  # ~ +10%
 
-# Opzioni (IT)
 PRECIP_OPTIONS = ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"]
 SURF_OPTIONS   = ["asciutto","fango","roccia bagnata","neve dura","ghiaccio"]
 EXPO_OPTIONS   = ["ombra","misto","pieno sole"]
@@ -51,10 +47,10 @@ DEFAULTS = dict(
     expo="misto", tech="normale", loadkg=6.0
 )
 
-# ========== Utility numeriche ==========
-def _dist_km(lat1, lon1, lat2, lon2):
-    dy = (lat2 - lat1) * 111.32
-    dx = (lon2 - lon1) * 111.32 * math.cos(math.radians((lat1 + lat2) / 2.0))
+# ===== Utility =====
+def _dist_km(la1, lo1, la2, lo2):
+    dy = (la2 - la1) * 111.32
+    dx = (lo2 - lo1) * 111.32 * math.cos(math.radians((la1 + la2) / 2.0))
     return math.hypot(dx, dy)
 
 def median_k(seq, k=3):
@@ -62,7 +58,7 @@ def median_k(seq, k=3):
     if k % 2 == 0: k += 1
     h = k // 2; out = []; n = len(seq)
     for i in range(n):
-        a = max(0, i - h); b = min(n, i + h + 1)
+        a = max(0, i-h); b = min(n, i+h+1)
         w = sorted(seq[a:b]); out.append(w[len(w)//2])
     return out
 
@@ -70,13 +66,12 @@ def moving_avg(seq, k=3):
     if k < 1: k = 1
     h = k // 2; out = []; n = len(seq)
     for i in range(n):
-        a = max(0, i - h); b = min(n, i + h + 1)
-        out.append(sum(seq[a:b]) / max(1, b - a))
+        a = max(0, i-h); b = min(n, i+h+1)
+        out.append(sum(seq[a:b]) / max(1, b-a))
     return out
 
 def resample_elev(cum_m, ele, step_m=3.0):
-    total = cum_m[-1]
-    n = int(total // step_m) + 1
+    total = cum_m[-1]; n = int(total // step_m) + 1
     out = []; t = 0.0; j = 0
     for _ in range(n):
         while j < len(cum_m)-1 and cum_m[j+1] < t: j += 1
@@ -90,18 +85,17 @@ def resample_elev(cum_m, ele, step_m=3.0):
 
 def _is_loop(lat, lon, tol_m=LOOP_TOL_M):
     if len(lat) < 2: return False
-    return _dist_km(lat[0], lon[0], lat[-1], lon[-1]) * 1000.0 <= tol_m
+    return _dist_km(lat[0], lon[0], lat[-1], lon[-1])*1000.0 <= tol_m
 
 def apply_loop_drift_correction(elev_series, lat, lon, min_abs=DRIFT_MIN_ABS_M):
-    if not _is_loop(lat, lon) or len(elev_series) < 2:
-        return elev_series, False, 0.0
+    if not _is_loop(lat, lon) or len(elev_series) < 2: return elev_series, False, 0.0
     drift = elev_series[-1] - elev_series[0]
     if abs(drift) < min_abs: return elev_series, False, drift
-    n = len(elev_series) - 1
-    fixed = [elev_series[i] - (drift * (i / n)) for i in range(len(elev_series))]
+    n = len(elev_series)-1
+    fixed = [elev_series[i] - (drift * (i/n)) for i in range(len(elev_series))]
     return fixed, True, drift
 
-# ========== Meteo/tecnica ==========
+# ==== Meteo/tecnica ====
 def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
     if   temp_c < -5: M_temp = 1.20
     elif temp_c < 0:  M_temp = 1.10
@@ -143,15 +137,15 @@ def technique_multiplier(level="normale"):
 def pack_load_multiplier(extra_load_kg=0.0):
     return 1.0 + 0.02 * max(0.0, extra_load_kg/5.0)
 
-def cat_from_if(val: float) -> str:
-    if val < 30: return "Facile"
-    if val < 50: return "Medio"
-    if val < 70: return "Impegnativo"
-    if val < 80: return "Difficile"
-    if val <= 90: return "Molto difficile"
+def cat_from_if(v):
+    if v < 30: return "Facile"
+    if v < 50: return "Medio"
+    if v < 70: return "Impegnativo"
+    if v < 80: return "Difficile"
+    if v <= 90: return "Molto diff."
     return "Estremo"
 
-# ========== Parsing GPX ==========
+# ==== Parsing GPX ====
 def parse_gpx(uploaded_file) -> pd.DataFrame:
     if HAS_GPXPY:
         text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
@@ -195,7 +189,7 @@ def parse_gpx(uploaded_file) -> pd.DataFrame:
     df["dist_m"] = dist
     return df
 
-# ========== Motore di calcolo ==========
+# ==== Motore di calcolo ====
 def compute_from_arrays(lat, lon, ele_raw,
                         base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
                         weight_kg=70.0, reverse=False):
@@ -272,7 +266,6 @@ def compute_from_arrays(lat, lon, ele_raw,
     cal_tot=int(round(cal_flat+cal_up+cal_down))
 
     x_km=[min(i*RS_STEP_M,total_m)/1000.0 for i in range(len(e_sm))]
-
     surge_idx = round(surge_trans / max(0.1, tot_km), 2)
 
     return {
@@ -282,10 +275,8 @@ def compute_from_arrays(lat, lon, ele_raw,
         "len_flat_km": round(flat_len/1000.0,2), "len_up_km": round(asc_len/1000.0,2), "len_down_km": round(desc_len/1000.0,2),
         "grade_up_pct": round(grade_up,1), "grade_down_pct": round(grade_down,1),
         "cal_total": cal_tot,
-        "asc_bins_m": [round(v,0) for v in asc_bins],
-        "desc_bins_m": [round(v,0) for v in desc_bins],
-        "lcs25_m": round(longest_steep_run,0),
-        "blocks25_count": int(blocks25),
+        "asc_bins_m": [round(v,0) for v in asc_bins], "desc_bins_m": [round(v,0) for v in desc_bins],
+        "lcs25_m": round(longest_steep_run,0), "blocks25_count": int(blocks25),
         "surge_idx_per_km": surge_idx,
         "avg_alt_m": float(np.mean(ele_raw)) if ele_raw else None,
         "profile_x_km": x_km, "profile_y_m": e_sm[:],
@@ -336,34 +327,21 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     else: cat="Estremo"
     return {"IF": IF, "cat": cat}
 
-# ========== Gauge Altair (senza Matplotlib) ==========
-import numpy as np
-import pandas as pd
-import altair as alt
-
+# ==== Gauge Altair robusto (semicerchio + lancetta) ====
 def draw_gauge_altair(score: float):
     """
-    Gauge SEMICIRCOLARE con Altair:
-    - 180 micro-archi (1°) colorati per fascia
-    - Lancetta nera
-    - Foro centrale (donut)
-    Funziona ovunque senza Matplotlib.
+    180 micro-archi (1°) per garantire SEMICERCHIO ovunque.
+    Lancetta nera; foro centrale per donut.
     """
     score = float(np.clip(score, 0, 100))
 
-    # Mappa colori e dominio (ordine fisso)
     color_domain = ["Facile", "Medio", "Impeg.", "Diffic.", "Molto diff.", "Estremo"]
     color_range  = ["#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#8e44ad", "#111111"]
 
-    # 0..179 gradi => 180 micro-archi da 1°
     deg = np.arange(0, 180, 1)
-    df = pd.DataFrame({
-        "startDeg": deg.astype(float),
-        "endDeg":   (deg + 1).astype(float)
-    })
+    df = pd.DataFrame({"startDeg": deg.astype(float),
+                       "endDeg":   (deg + 1).astype(float)})
 
-    # Etichetta fascia in base alla "percentuale" corrispondente all'angolo
-    # (0°->0, 180°->100)
     def label_for_deg(d):
         v = d / 180.0 * 100.0
         if v < 30:  return "Facile"
@@ -375,12 +353,11 @@ def draw_gauge_altair(score: float):
 
     df["label"] = [label_for_deg(d) for d in deg]
 
-    # Arco del quadrante (semicerchio)
     arcs = (
         alt.Chart(df)
         .mark_arc(innerRadius=60, outerRadius=100)
         .encode(
-            theta = alt.Theta("startDeg:Q"),
+            theta = alt.Theta("startDeg:Q", stack=None),
             theta2= alt.Theta2("endDeg:Q"),
             color = alt.Color("label:N",
                               scale=alt.Scale(domain=color_domain, range=color_range),
@@ -389,7 +366,6 @@ def draw_gauge_altair(score: float):
         .properties(height=240)
     )
 
-    # Lancetta (sottilissimo arco centrato sull'angolo del punteggio)
     needle_deg = score / 100.0 * 180.0
     needle_df = pd.DataFrame({"start":[max(0.0, needle_deg-0.7)],
                               "end":[min(180.0, needle_deg+0.7)]})
@@ -399,15 +375,13 @@ def draw_gauge_altair(score: float):
         .encode(theta="start:Q", theta2="end:Q")
     )
 
-    # Foro centrale (per avere il donut pulito)
     hole = (
         alt.Chart(pd.DataFrame({"start":[0.0], "end":[360.0]}))
         .mark_arc(innerRadius=0, outerRadius=56, color="#ffffff")
         .encode(theta="start:Q", theta2="end:Q")
     )
 
-    # Testo centrale: valore + categoria
-    def cat_from_if(v):
+    def _cat(v):
         if v < 30: return "Facile"
         if v < 50: return "Medio"
         if v < 70: return "Impegnativo"
@@ -415,17 +389,14 @@ def draw_gauge_altair(score: float):
         if v <= 90: return "Molto diff."
         return "Estremo"
 
-    lab = cat_from_if(score)
-
+    lab = _cat(score)
     txt_val = alt.Chart(pd.DataFrame({"t":[f"{score:.1f}"]})).mark_text(
         font="Segoe UI", fontSize=22, fontWeight="bold", dy=-8
     ).encode(text="t:N")
-
     txt_lab = alt.Chart(pd.DataFrame({"t":[f"({lab})"]})).mark_text(
         font="Segoe UI", fontSize=14, dy=18
     ).encode(text="t:N")
 
-    # Piccolo riferimento a 50 (90°)
     tick50 = pd.DataFrame({"start":[90-0.6], "end":[90+0.6]})
     tick = alt.Chart(tick50).mark_arc(innerRadius=84, outerRadius=100, color="#666").encode(
         theta="start:Q", theta2="end:Q"
@@ -433,44 +404,34 @@ def draw_gauge_altair(score: float):
 
     return (arcs + tick + needle + hole + txt_val + txt_lab).configure_view(strokeWidth=0)
 
-
-
-# ========== UI ==========
+# ==== UI ====
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
 st.title(APP_TITLE)
 
-# uploader e reset dei parametri quando cambia file
 uploaded = st.file_uploader("📂 Carica GPX", type=["gpx"])
 if "gpx_name" not in st.session_state: st.session_state.gpx_name = None
 if uploaded is not None and uploaded.name != st.session_state.gpx_name:
     st.session_state.gpx_name = uploaded.name
-    for k,v in DEFAULTS.items():
-        st.session_state[k] = v  # reset a default
+    for k,v in DEFAULTS.items(): st.session_state[k] = v
 
-# pannello parametri
 with st.sidebar:
     st.markdown("### Impostazioni")
-    base = st.number_input("Min/km (piano)", min_value=1.0, max_value=60.0, step=0.5,
-                           value=st.session_state.get("base", DEFAULTS["base"]), key="base")
-    up   = st.number_input("Min/100 m (salita)", min_value=1.0, max_value=60.0, step=0.5,
-                           value=st.session_state.get("up", DEFAULTS["up"]), key="up")
-    down = st.number_input("Min/200 m (discesa)", min_value=1.0, max_value=60.0, step=0.5,
-                           value=st.session_state.get("down", DEFAULTS["down"]), key="down")
-    weight = st.number_input("Peso (kg)", min_value=30.0, max_value=150.0, step=1.0,
-                             value=st.session_state.get("weight", DEFAULTS["weight"]), key="weight")
-    reverse = st.checkbox("Inverti traccia", value=st.session_state.get("reverse", DEFAULTS["reverse"]), key="reverse")
+    base = st.number_input("Min/km (piano)", 1.0, 60.0, value=st.session_state.get("base", 15.0), step=0.5, key="base")
+    up   = st.number_input("Min/100 m (salita)", 1.0, 60.0, value=st.session_state.get("up", 15.0), step=0.5, key="up")
+    down = st.number_input("Min/200 m (discesa)", 1.0, 60.0, value=st.session_state.get("down", 15.0), step=0.5, key="down")
+    weight = st.number_input("Peso (kg)", 30.0, 150.0, value=st.session_state.get("weight", 70.0), step=1.0, key="weight")
+    reverse = st.checkbox("Inverti traccia", value=st.session_state.get("reverse", False), key="reverse")
 
     st.markdown("### Condizioni")
-    temp = st.number_input("Temperatura (°C)", -30.0, 50.0, value=st.session_state.get("temp", DEFAULTS["temp"]), key="temp")
-    hum  = st.number_input("Umidità (%)", 0.0, 100.0, value=st.session_state.get("hum", DEFAULTS["hum"]), key="hum")
-    wind = st.number_input("Vento (km/h)", 0.0, 150.0, value=st.session_state.get("wind", DEFAULTS["wind"]), key="wind")
-    precip = st.selectbox("Precipitazioni", PRECIP_OPTIONS, index=PRECIP_OPTIONS.index(st.session_state.get("precip", DEFAULTS["precip"])), key="precip")
-    surface = st.selectbox("Fondo", SURF_OPTIONS, index=SURF_OPTIONS.index(st.session_state.get("surface", DEFAULTS["surface"])), key="surface")
-    expo = st.selectbox("Esposizione", EXPO_OPTIONS, index=EXPO_OPTIONS.index(st.session_state.get("expo", DEFAULTS["expo"])), key="expo")
-    tech = st.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(st.session_state.get("tech", DEFAULTS["tech"])), key="tech")
-    loadkg = st.number_input("Zaino extra (kg)", 0.0, 40.0, value=st.session_state.get("loadkg", DEFAULTS["loadkg"]), key="loadkg")
+    temp = st.number_input("Temperatura (°C)", -30.0, 50.0, value=st.session_state.get("temp", 15.0), key="temp")
+    hum  = st.number_input("Umidità (%)", 0.0, 100.0, value=st.session_state.get("hum", 50.0), key="hum")
+    wind = st.number_input("Vento (km/h)", 0.0, 150.0, value=st.session_state.get("wind", 5.0), key="wind")
+    precip = st.selectbox("Precipitazioni", PRECIP_OPTIONS, index=PRECIP_OPTIONS.index(st.session_state.get("precip","assenza pioggia")), key="precip")
+    surface = st.selectbox("Fondo", SURF_OPTIONS, index=SURF_OPTIONS.index(st.session_state.get("surface","asciutto")), key="surface")
+    expo = st.selectbox("Esposizione", EXPO_OPTIONS, index=EXPO_OPTIONS.index(st.session_state.get("expo","misto")), key="expo")
+    tech = st.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(st.session_state.get("tech","normale")), key="tech")
+    loadkg = st.number_input("Zaino extra (kg)", 0.0, 40.0, value=st.session_state.get("loadkg", 6.0), key="loadkg")
 
-# tre KPI principali
 k1, k2, k3 = st.columns(3)
 
 if uploaded is None:
@@ -485,19 +446,17 @@ else:
         st.warning("Il GPX non contiene punti utilizzabili con quota.")
     else:
         lat = df["lat"].to_list(); lon = df["lon"].to_list(); ele = df["ele"].to_list()
-
         res = compute_from_arrays(lat, lon, ele, base, up, down, weight, reverse)
-        # KPI
-        k1.metric("Distanza (km)", f"{res['tot_km']:.2f}")
-        k2.metric("Dislivello + (m)", f"{int(res['dplus'])}")
 
         def fmt_hm(minutes):
             h=int(minutes//60); m=int(round(minutes-h*60))
             if m==60: h+=1; m=0
             return f"{h}:{m:02d}"
+
+        k1.metric("Distanza (km)", f"{res['tot_km']:.2f}")
+        k2.metric("Dislivello + (m)", f"{int(res['dplus'])}")
         k3.metric("Tempo totale", fmt_hm(res["t_total"]))
 
-        # blocco risultati dettagliati
         st.subheader("Risultati")
         cA, cB, cC = st.columns(3)
         with cA:
@@ -519,10 +478,8 @@ else:
             st.write(f"**Blocchi ripidi (≥100 m @ ≥25%):** {int(res['blocks25_count'])}")
             st.write(f"**Surge (cambi ritmo)/km:** {res['surge_idx_per_km']:.2f}")
 
-        # Indice di Difficoltà
         fi = compute_if_from_res(
-            res,
-            temp_c=temp, humidity_pct=hum,
+            res, temp_c=temp, humidity_pct=hum,
             precip_it=precip, surface_it=surface,
             wind_kmh=wind, expo_it=expo,
             technique_level=tech, extra_load_kg=loadkg
@@ -531,17 +488,14 @@ else:
         st.markdown(f"**{fi['IF']}  ({fi['cat']})**")
         st.altair_chart(draw_gauge_altair(fi["IF"]), use_container_width=True)
 
-        # Profilo altimetrico
         st.subheader("Profilo altimetrico")
         prof = pd.DataFrame({"km":res["profile_x_km"], "elev":res["profile_y_m"]})
-        chart = alt.Chart(prof).mark_line(strokeWidth=2.2).encode(
-                        x=alt.X("km:Q", title="Distanza (km)"),
-                        y=alt.Y("elev:Q", title="Quota (m)")
-                  ).properties(height=460)   # alza quanto preferisci
-
+        chart = alt.Chart(prof).mark_line(strokeWidth=2.4).encode(
+            x=alt.X("km:Q", title="Distanza (km)"),
+            y=alt.Y("elev:Q", title="Quota (m)")
+        ).properties(height=460)  # più alto per non essere "steso"
         st.altair_chart(chart, use_container_width=True)
 
-        # note su correzioni anello
         msgs=[]
         if res.get("loop_fix_applied"): msgs.append(f"Corretta deriva ~{res['loop_drift_abs_m']} m")
         if res.get("loop_balance_applied"): msgs.append(f"Chiusura anello: D+ allineato a D− (diff {res['balance_diff_m']} m)")
