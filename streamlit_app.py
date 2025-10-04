@@ -642,20 +642,53 @@ with cL:
         f"- **Buchi GPX:** {'0' if res['holes']==0 else str(res['holes'])}"
     )
 
-with cR:
+
+# --- PROFILO ALTIMETRICO ---
 st.subheader("Profilo altimetrico")
 
-# slider per regolare l'altezza (vedi punto 4)
+# slider per regolare l'altezza del grafico (lo puoi tenere nella sidebar)
 prof_h = st.sidebar.slider("Altezza profilo (px)", 220, 600, 320, 10)
 
-dfp = pd.DataFrame(dict(km=res["profile_x_km"], quota=res["profile_y_m"]))
-chart = alt.Chart(dfp).mark_line().encode(
-    x=alt.X(
-        "km:Q",
-        axis=alt.Axis(title="Distanza (km)", tickMinStep=1, labelPadding=8, titlePadding=30)
-    ),
-    y=alt.Y("quota:Q", axis=alt.Axis(title="Quota (m)"))
-).properties(height=prof_h).configure_view(strokeWidth=0)
+dfp = pd.DataFrame({
+    "km":   res["profile_x_km"],
+    "quota": res["profile_y_m"]
+})
+
+base = (
+    alt.Chart(dfp)
+    .mark_line()
+    .encode(
+        x=alt.X(
+            "km:Q",
+            axis=alt.Axis(
+                title="Distanza (km)",
+                tickMinStep=1,
+                labelPadding=8,
+                titlePadding=30
+            )
+        ),
+        y=alt.Y("quota:Q", axis=alt.Axis(title="Quota (m)"))
+    )
+    .properties(height=prof_h)
+    .configure_view(strokeWidth=0)
+)
+
+# Se hai creato labels_df/show_km_labels per mostrare i tempi al Km sul profilo,
+# puoi sovrapporre le etichette così. Altrimenti elimina questo blocco if.
+chart = base
+if "labels_df" in locals() and show_km_labels:
+    labels = (
+        alt.Chart(labels_df)
+        .mark_text(dy=-8, fontSize=10)
+        .encode(
+            x="km:Q",
+            y="quota:Q",
+            text="label:N"
+        )
+    )
+    chart = base + labels
+
+st.altair_chart(chart, use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────
 st.subheader("Tempi/Orario ai diversi Km")
