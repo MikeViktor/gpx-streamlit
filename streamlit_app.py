@@ -1,33 +1,36 @@
 # streamlit_app.py
-# v5 — IF + split/orari + esport waypoint — settori gauge corretti (no gpxpy)
+# -*- coding: utf-8 -*-
 
 import io
 import math
-from datetime import datetime, timedelta
-import xml.etree.ElementTree as ET
+import datetime as dt
 
 import numpy as np
 import pandas as pd
+import altair as alt
 import streamlit as st
-import matplotlib.pyplot as plt
-from matplotlib.patches import Wedge
+import gpxpy
+
+# ========== CONFIG ==========
 
 st.set_page_config(page_title="Analisi Tracce GPX", layout="wide")
 
-# ------------------------------
-# Parametri calcolo (come GUI)
-# ------------------------------
+APP_TITLE = "v5 — IF + tempi al km + esportazione waypoint"
+
+# --- Ricampionamento / filtri ---
 RS_STEP_M     = 3.0
 RS_MIN_DELEV  = 0.25
 RS_MED_K      = 3
 RS_AVG_K      = 3
 ABS_JUMP_RAW  = 100.0
 
+# --- Correzione anello ---
 LOOP_TOL_M        = 200.0
 DRIFT_MIN_ABS_M   = 2.0
 BALANCE_MIN_DIFFM = 10.0
 BALANCE_REL_FRAC  = 0.05
 
+# --- Pesi Indice di Difficoltà ---
 W_D       = 0.5
 W_PLUS    = 1.0
 W_COMP    = 0.5
@@ -38,48 +41,81 @@ W_BLOCKS  = 0.15
 W_SURGE   = 0.25
 IF_S0     = 80.0
 ALPHA_METEO = 0.6
-SEVERITY_GAIN = 1.52
+SEVERITY_GAIN = 1.52  # come desktop
 
 DEFAULTS = dict(
     base=15.0, up=15.0, down=15.0,
+    weight=70.0, reverse=False,
     temp=15.0, hum=50.0, wind=5.0,
-    precip="assenza pioggia", surface="asciutto", expo="misto",
-    tech="normale", loadkg=6.0,
+    precip="assenza pioggia",
+    surface="asciutto",
+    expo="misto",
+    tech="normale",
+    loadkg=6.0,
 )
 
-# ------------------------------
-# Utility/Calcolo
-# ------------------------------
+PRECIP_OPTIONS = ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"]
+SURF_OPTIONS   = ["asciutto","fango","roccia bagnata","neve dura","ghiaccio"]
+EXPO_OPTIONS   = ["ombra","misto","pieno sole"]
+TECH_OPTIONS   = ["facile","normale","roccioso","passaggi di roccia (scrambling)","neve/ghiaccio"]
+
+# ========== UTIL ==========
+
+def _fmt_hm(minutes: float) -> str:
+    if minutes is None: return "-"
+    h = int(minutes // 60)
+    m = int(round(minutes - h * 60))
+    if m == 60:
+        h += 1; m = 0
+    return f"{h}:{m:02d}"
+
+def _fmt_mmss(minutes: float) -> str:
+    total_sec = int(round(minutes * 60))
+    mm = total_sec // 60
+    ss = total_sec % 60
+    return f"{mm}:{ss:02d}"
+
+def _fmt_time_of_day(start: dt.time, minutes_since_start: float) -> str:
+    base = dt.datetime.combine(dt.date.today(), start)
+    out  = base + dt.timedelta(minutes=float(minutes_since_start))
+    return out.strftime("%H:%M")
+
 def _is_tag(e, name: str) -> bool:
     t = e.tag
     return t.endswith('}' + name) or t == name
 
-def parse_gpx(file_bytes: bytes):
-    """Parser GPX leggero (ElementTree). Ritorna (lat, lon, ele)."""
-    # decodifica tollerante: alcune app salvano GPX con charset strani
-    data = file_bytes.decode("utf-8", errors="ignore")
-    root = ET.fromstring(data)
+# ========== GPX PARSE ==========
 
-    for wanted in ("trkpt", "rtept", "wpt"):
-        lat, lon, ele = [], [], []
-        for el in root.iter():
-            if _is_tag(el, wanted):
-                la = el.attrib.get("lat"); lo = el.attrib.get("lon")
-                if la is None or lo is None:
+def parse_gpx_bytes(gpx_bytes: bytes, reverse=False):
+    gpx = gpxpy.parse(io.StringIO(gpx_bytes.decode("utf-8", errors="ignore")))
+    lat, lon, ele = [], [], []
+    for trk in gpx.tracks:
+        for seg in trk.segments:
+            for p in seg.points:
+                if p.latitude is None or p.longitude is None or p.elevation is None:
                     continue
-                z = None
-                for ch in el:
-                    if _is_tag(ch, "ele"):
-                        z = ch.text; break
-                if z is None:
+                lat.append(float(p.latitude))
+                lon.append(float(p.longitude))
+                ele.append(float(p.elevation))
+    # route e waypoints (fallback)
+    if not lat:
+        for rte in gpx.routes:
+            for p in rte.points:
+                if p.latitude is None or p.longitude is None or p.elevation is None:
                     continue
-                try:
-                    lat.append(float(la)); lon.append(float(lo)); ele.append(float(z))
-                except:
-                    pass
-        if lat:
-            return lat, lon, ele
-    return [], [], []
+                lat.append(float(p.latitude))
+                lon.append(float(p.longitude))
+                ele.append(float(p.elevation))
+    if not lat:
+        for w in gpx.waypoints:
+            if w.latitude is None or w.longitude is None or w.elevation is None:
+                continue
+            lat.append(float(w.latitude))
+            lon.append(float(w.longitude))
+            ele.append(float(w.elevation))
+    if reverse and lat:
+        lat.reverse(); lon.reverse(); ele.reverse()
+    return lat, lon, ele
 
 def dist_km(lat1, lon1, lat2, lon2):
     dy = (lat2 - lat1) * 111.32
@@ -129,6 +165,8 @@ def apply_loop_drift_correction(elev_series, lat, lon, min_abs=DRIFT_MIN_ABS_M):
     fixed = [elev_series[i] - (drift*(i/n)) for i in range(len(elev_series))]
     return fixed, True, drift
 
+# ========== METEO / FATTORI ==========
+
 def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
     if   temp_c < -5: M_temp = 1.20
     elif temp_c < 0:  M_temp = 1.10
@@ -140,17 +178,21 @@ def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
     else:             M_temp = 1.35
     if   humidity_pct > 80: M_temp += 0.10
     elif humidity_pct > 60: M_temp += 0.05
-    precip_map = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}
-    surface_map = {"dry":1.00,"mud":1.10,"wet_rock":1.15,"hard_snow":1.30,"ice":1.60}
-    exposure_map = {"shade":1.00,"mixed":1.05,"sun":1.10}
-    M_precip  = precip_map.get(precip, 1.00)
-    M_surface = surface_map.get(surface, 1.00)
-    M_sun     = exposure_map.get(exposure, 1.00)
+
+    precip_map  = {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}
+    surface_map = {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
+    exposure_map= {"ombra":"shade","misto":"mixed","pieno sole":"sun"}
+
+    M_precip  = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}[precip_map.get(precip,"dry")]
+    M_surface = {"dry":1.00,"mud":1.10,"wet_rock":1.15,"hard_snow":1.30,"ice":1.60}[surface_map.get(surface,"dry")]
+    M_sun     = {"shade":1.00,"mixed":1.05,"sun":1.10}[exposure_map.get(exposure,"mixed")]
+
     if   wind_kmh <= 10: M_wind = 1.00
     elif wind_kmh <= 20: M_wind = 1.05
     elif wind_kmh <= 35: M_wind = 1.10
     elif wind_kmh <= 60: M_wind = 1.20
     else:                M_wind = 1.35
+
     return min(1.4, M_temp * max(M_precip, M_surface) * M_wind * M_sun)
 
 def altitude_multiplier(avg_alt_m):
@@ -159,11 +201,7 @@ def altitude_multiplier(avg_alt_m):
     return 1.0 + 0.03 * excess
 
 def technique_multiplier(level="normale"):
-    table = {
-        "facile": 0.95, "normale": 1.00, "roccioso": 1.10,
-        "passaggi di roccia (scrambling)": 1.20, "neve/ghiaccio": 1.30,
-        "scrambling": 1.20,
-    }
+    table = {"facile":0.95,"normale":1.00,"roccioso":1.10,"passaggi di roccia (scrambling)":1.20,"neve/ghiaccio":1.30,"scrambling":1.20}
     return table.get(level, 1.0)
 
 def pack_load_multiplier(extra_load_kg=0.0):
@@ -177,18 +215,21 @@ def cat_from_if(val: float) -> str:
     if val <= 90: return "Molto difficile"
     return "Estremamente difficile"
 
+# ========== CORE CALC ==========
+
 def compute_from_arrays(lat, lon, ele_raw,
                         base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
-                        reverse=False):
-    if len(ele_raw) < 2: raise ValueError("Nessun punto utile con elevazione nel GPX.")
-    if reverse:
-        lat=list(reversed(lat)); lon=list(reversed(lon)); ele_raw=list(reversed(ele_raw))
+                        weight_kg=70.0):
+    if len(ele_raw) < 2:
+        raise ValueError("Nessun punto utile con elevazione nel GPX.")
 
+    # distanza cumulata (m)
     cum=[0.0]
     for i in range(1,len(lat)):
         cum.append(cum[-1]+dist_km(lat[i-1],lon[i-1],lat[i],lon[i])*1000.0)
     tot_km=cum[-1]/1000.0; total_m=cum[-1]
 
+    # profilo ricampionato + filtri + correzione anello
     e_res=resample_elev(cum,ele_raw,RS_STEP_M)
     e_res, loop_fix, loop_drift = apply_loop_drift_correction(e_res,lat,lon)
     e_med=median_k(e_res,RS_MED_K); e_sm=moving_avg(e_med,RS_AVG_K)
@@ -240,12 +281,23 @@ def compute_from_arrays(lat, lon, ele_raw,
     grade_up   = (asc_gain/asc_len*100.0)  if asc_len>0 else 0.0
     grade_down = (desc_drop/desc_len*100.0) if desc_len>0 else 0.0
 
+    # tempi globali
     t_dist  = tot_km*base_min_per_km
     t_up    = (dplus/100.0)*up_min_per_100m
     t_down  = (dneg/200.0)*down_min_per_200m
     t_total = t_dist+t_up+t_down
 
-    holes = sum(1 for i in range(1,len(ele_raw)) if abs(ele_raw[i]-ele_raw[i-1])>=ABS_JUMP_RAW)
+    holes = 0
+    for i in range(1,len(ele_raw)):
+        if abs(ele_raw[i]-ele_raw[i-1])>=ABS_JUMP_RAW:
+            holes += 1
+
+    weight_kg=max(1.0,float(weight_kg))
+    cal_flat=weight_kg*0.6*max(0.0,tot_km)
+    cal_up  =weight_kg*0.006*max(0.0,dplus)
+    cal_down=weight_kg*0.003*max(0.0,dneg)
+    cal_tot=int(round(cal_flat+cal_up+cal_down))
+
     x_km=[min(i*RS_STEP_M,total_m)/1000.0 for i in range(len(e_sm))]
 
     surge_idx = round(surge_trans / max(0.1, tot_km), 2)
@@ -256,6 +308,7 @@ def compute_from_arrays(lat, lon, ele_raw,
         "holes": holes,
         "len_flat_km": round(flat_len/1000.0,2), "len_up_km": round(asc_len/1000.0,2), "len_down_km": round(desc_len/1000.0,2),
         "grade_up_pct": round(grade_up,1), "grade_down_pct": round(grade_down,1),
+        "cal_total": cal_tot,
         "asc_bins_m": [round(v,0) for v in asc_bins],
         "desc_bins_m": [round(v,0) for v in desc_bins],
         "lcs25_m": round(longest_steep_run,0),
@@ -263,8 +316,8 @@ def compute_from_arrays(lat, lon, ele_raw,
         "surge_idx_per_km": surge_idx,
         "avg_alt_m": sum(ele_raw)/len(ele_raw) if ele_raw else None,
         "profile_x_km": x_km, "profile_y_m": e_sm[:],
-        "loop_fix_applied": False,  # non mostriamo più “corretta deriva”
-        "loop_balance_applied": bool(balance), "loop_like": bool(loop_like), "balance_diff_m": round(abs(dplus-dneg),1),
+        "loop_fix_applied": bool(loop_fix), "loop_drift_abs_m": round(abs(loop_drift),1),
+        "loop_balance_applied": bool(balance), "loop_like": bool(loop_like), "balance_diff_m": round(diff,1),
     }
 
 def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_kmh, expo_it, technique_level, extra_load_kg):
@@ -289,221 +342,289 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     surf_map={"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
     expo_map={"ombra":"shade","misto":"mixed","pieno sole":"sun"}
 
-    def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
-        if   temp_c < -5: M_temp = 1.20
-        elif temp_c < 0:  M_temp = 1.10
-        elif temp_c < 5:  M_temp = 1.05
-        elif temp_c <= 20:M_temp = 1.00
-        elif temp_c <= 25:M_temp = 1.05
-        elif temp_c <= 30:M_temp = 1.10
-        elif temp_c <= 35:M_temp = 1.20
-        else:             M_temp = 1.35
-        if   humidity_pct > 80: M_temp += 0.10
-        elif humidity_pct > 60: M_temp += 0.05
-        precip_map_i = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}
-        surface_map_i = {"dry":1.00,"mud":1.10,"wet_rock":1.15,"hard_snow":1.30,"ice":1.60}
-        exposure_map_i = {"shade":1.00,"mixed":1.05,"sun":1.10}
-        M_precip  = precip_map_i.get(precip, 1.00)
-        M_surface = surface_map_i.get(surface, 1.00)
-        M_sun     = exposure_map_i.get(exposure, 1.00)
-        if   wind_kmh <= 10: M_wind = 1.00
-        elif wind_kmh <= 20: M_wind = 1.05
-        elif wind_kmh <= 35: M_wind = 1.10
-        elif wind_kmh <= 60: M_wind = 1.20
-        else:                M_wind = 1.35
-        return min(1.4, M_temp * max(M_precip, M_surface) * M_wind * M_sun)
-
-    M = meteo_multiplier(temp_c, humidity_pct,
-                         {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}[precip],
-                         {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}[surface],
-                         wind_kmh,
-                         {"ombra":"shade","misto":"mixed","pieno sole":"sun"}[expo]) \
+    M = meteo_multiplier(temp_c, humidity_pct, precip_map[precip_it], surf_map[surface_it], wind_kmh, expo_map[expo_it]) \
         * altitude_multiplier(res.get("avg_alt_m")) \
         * technique_multiplier(technique_level) \
         * pack_load_multiplier(extra_load_kg)
-
     bump = (100.0 - IF_base) * max(0.0, (M - 1.0)) * ALPHA_METEO
     IF = min(100.0, (IF_base + bump) * SEVERITY_GAIN)
     IF = round(IF,1)
     return {"IF": IF, "cat": cat_from_if(IF)}
 
-def fmt_hm(minutes):
-    h=int(minutes//60); m=int(round(minutes-h*60))
-    if m==60: h+=1; m=0
-    return f"{h}:{m:02d}"
+# ========== TEMPI PER KM (non lineari) ==========
 
-# ------------------------------
-# Sidebar
-# ------------------------------
+def per_km_splits(res, base_min_per_km, up_min_per_100m, down_min_per_200m,
+                  start_time: dt.time, show_orario: bool):
+    """
+    Tempo per km calcolato segmento per segmento.
+    """
+    x = np.array(res["profile_x_km"]) * 1000.0  # m
+    y = np.array(res["profile_y_m"])
+
+    splits = []
+    if len(x) < 2:
+        return pd.DataFrame(columns=["Km","Tempo parziale","Ora del giorno"]), {}
+
+    cum_t_min = 0.0
+    next_km_m = 1000.0
+    prev_x = x[0]; prev_y = y[0]
+
+    labels_map = {}  # km -> testo (split o orario) per etichette su grafico
+
+    for i in range(1, len(x)):
+        seg_m = float(x[i] - prev_x)
+        if seg_m <= 0:
+            prev_x = x[i]; prev_y = y[i]; continue
+        d_ele = float(y[i] - prev_y)
+
+        # tempo segmento
+        t_seg = 0.0
+        t_seg += (seg_m/1000.0) * base_min_per_km
+        if d_ele > 0:
+            t_seg += (d_ele/100.0) * up_min_per_100m
+        elif d_ele < 0:
+            t_seg += ((-d_ele)/200.0) * down_min_per_200m
+
+        while next_km_m <= x[i]:
+            part = (next_km_m - prev_x) / seg_m
+            d_ele_part = (prev_y + part*(y[i]-prev_y)) - prev_y
+            t_part = 0.0
+            t_part += ((next_km_m - prev_x)/1000.0) * base_min_per_km
+            if d_ele_part > 0:
+                t_part += (d_ele_part/100.0) * up_min_per_100m
+            elif d_ele_part < 0:
+                t_part += ((-d_ele_part)/200.0) * down_min_per_200m
+
+            cum_t_min += t_part
+            split_min = t_part
+            km_idx = int(round(next_km_m/1000.0))
+            if km_idx >= 1:
+                if show_orario:
+                    labels_map[km_idx] = _fmt_time_of_day(start_time, cum_t_min)
+                else:
+                    labels_map[km_idx] = _fmt_mmss(cum_t_min)
+                splits.append([km_idx, _fmt_mmss(split_min), _fmt_time_of_day(start_time, cum_t_min)])
+            prev_x = next_km_m
+            prev_y = prev_y + part*(y[i]-prev_y)
+            seg_m = float(x[i] - prev_x)
+            d_ele = float(y[i] - prev_y)
+            next_km_m += 1000.0
+
+        if seg_m > 0:
+            t_seg_rem = 0.0
+            t_seg_rem += (seg_m/1000.0) * base_min_per_km
+            if d_ele > 0:
+                t_seg_rem += (d_ele/100.0) * up_min_per_100m
+            elif d_ele < 0:
+                t_seg_rem += ((-d_ele)/200.0) * down_min_per_200m
+            cum_t_min += t_seg_rem
+
+        prev_x = x[i]; prev_y = y[i]
+
+    df = pd.DataFrame(splits, columns=["Km","Tempo parziale","Ora del giorno"])
+    return df, labels_map
+
+# ========== GAUGE (Altair) ==========
+
+GAUGE_BINS = [
+    (0, 30, "#2ecc71", "Facile"),
+    (30, 50, "#f1c40f", "Medio"),
+    (50, 70, "#e67e22", "Impeg."),
+    (70, 80, "#e74c3c", "Diffic."),
+    (80, 90, "#8e44ad", "Molto diff."),
+    (90, 100, "#111111", "Estremo"),
+]
+
+def _val2angle_deg(v: float) -> float:
+    v = max(0.0, min(100.0, float(v)))
+    return 180.0 - (v/100.0)*180.0
+
+def draw_gauge_altair(value: float, width=430, height=200):
+    segs = []
+    for a,b,col,label in GAUGE_BINS:
+        segs.append({
+            "start": math.radians(_val2angle_deg(a)),
+            "end":   math.radians(_val2angle_deg(b)),
+            "color": col, "label": label
+        })
+    df = pd.DataFrame(segs)
+
+    arcs = alt.Chart(df).mark_arc(innerRadius=70, outerRadius=100).encode(
+        startAngle="start:Q", endAngle="end:Q",
+        color=alt.Color("color:N", scale=None, legend=None)
+    )
+
+    ang = math.radians(_val2angle_deg(value))
+    needle = pd.DataFrame([{
+        "x1": 0, "y1": 0,
+        "x2": 60*math.cos(ang), "y2": 60*math.sin(ang)
+    }])
+    needle_layer = alt.Chart(needle).mark_line(stroke="#222", strokeWidth=3).encode(
+        x="x1:Q", y="y1:Q", x2="x2:Q", y2="y2:Q"
+    )
+    center = alt.Chart(pd.DataFrame({"x":[0],"y":[0]})).mark_point(filled=True, size=60, color="#222").encode(x="x:Q", y="y:Q")
+
+    base = alt.Chart().properties(width=width, height=height).configure_view(stroke=None)
+    scale = alt.Scale(domain=[-110, 110])
+
+    return alt.layer(
+        arcs.encode(x=alt.value(0), y=alt.value(0)).properties(width=width, height=height),
+        needle_layer.encode(x=alt.X("x1", scale=scale), y=alt.Y("y1", scale=scale),
+                            x2=alt.X2("x2"), y2=alt.Y2("y2")),
+        center.encode(x=alt.X("x:Q", scale=scale), y=alt.Y("y:Q", scale=scale))
+    ).configure_view(stroke=None)
+
+# ========== PROFILO (Altair) ==========
+
+def plot_profile_altair(x_km, y_m, labels_map=None):
+    dfp = pd.DataFrame({"Distanza (km)": x_km, "Quota (m)": y_m})
+    base = alt.Chart(dfp).mark_line().encode(
+        x=alt.X("Distanza (km):Q", title="Distanza (km)", axis=alt.Axis(tickMinStep=1)),
+        y=alt.Y("Quota (m):Q", title="Quota (m)")
+    )
+
+    layers = [base]
+
+    if labels_map:
+        pts = []
+        for km, label in labels_map.items():
+            # trova y approssimando al punto più vicino
+            idx = (np.abs(np.array(x_km) - km)).argmin()
+            pts.append({"Km": km, "Quota (m)": y_m[idx], "Etichetta": label})
+        dfl = pd.DataFrame(pts)
+        text = alt.Chart(dfl).mark_text(align="left", dx=6, dy=-6, fontSize=11).encode(
+            x="Km:Q", y="Quota (m):Q", text="Etichetta:N"
+        )
+        point = alt.Chart(dfl).mark_point(color="#333").encode(x="Km:Q", y="Quota (m):Q")
+        layers += [point, text]
+
+    return alt.layer(*layers).properties(height=330).interactive()
+
+# ========== EXPORT GPX ==========
+
+def build_gpx_with_waypoints(original_gpx_bytes: bytes, km_rows: pd.DataFrame, use_split=True):
+    # parse original, append waypoints
+    gpx = gpxpy.parse(io.StringIO(original_gpx_bytes.decode("utf-8", errors="ignore")))
+    for _, r in km_rows.iterrows():
+        km = int(r["Km"])
+        label = str(r["Tempo parziale"]) if use_split else str(r["Ora del giorno"])
+        name = f"Km {km} - {label}"
+        w = gpxpy.gpx.GPXWaypoint(latitude=None, longitude=None, elevation=None, name=name)
+        # many devices require coords; we'll append without coords to keep simple
+        gpx.waypoints.append(w)
+    return gpx.to_xml()
+
+def build_gpx_waypoints_only(km_rows: pd.DataFrame, use_split=True):
+    gpx = gpxpy.gpx.GPX()
+    for _, r in km_rows.iterrows():
+        km = int(r["Km"])
+        label = str(r["Tempo parziale"]) if use_split else str(r["Ora del giorno"])
+        name = f"Km {km} - {label}"
+        w = gpxpy.gpx.GPXWaypoint(latitude=0.0, longitude=0.0, elevation=0.0, name=name)
+        gpx.waypoints.append(w)
+    return gpx.to_xml()
+
+# ========== UI ==========
+
+st.title(APP_TITLE)
+
 with st.sidebar:
     st.header("Impostazioni")
-    inverti = st.checkbox("Inverti traccia", value=False)
+    file = st.file_uploader("Trascina qui il file GPX", type=["gpx"])
+    reverse = st.checkbox("Inverti traccia", value=False)
 
     st.subheader("Tempi per km")
-    show_clock = st.checkbox("Mostra orario del giorno", value=True)
+    show_orario = st.checkbox("Mostra orario del giorno", value=True)
     show_labels = st.checkbox("Mostra etichette sul grafico", value=True)
-    start_time = st.time_input("Orario di partenza", value=datetime.strptime("08:00","%H:%M").time())
+    start_time = st.time_input("Orario di partenza", value=dt.time(8,0))
 
     st.subheader("Parametri di passo (min)")
-    base = st.number_input("Min/km (piano)", 1.0, 60.0, DEFAULTS["base"], 0.5)
-    up   = st.number_input("Min/100 m (salita)", 1.0, 60.0, DEFAULTS["up"], 0.5)
-    down = st.number_input("Min/200 m (discesa)",1.0, 60.0, DEFAULTS["down"],0.5)
+    base = st.number_input("Min/km (piano)", min_value=1.0, max_value=60.0, value=DEFAULTS["base"], step=0.5)
+    up   = st.number_input("Min/100 m (salita)", min_value=1.0, max_value=60.0, value=DEFAULTS["up"], step=0.5)
+    down = st.number_input("Min/200 m (discesa)", min_value=1.0, max_value=60.0, value=DEFAULTS["down"], step=0.5)
 
     st.subheader("Condizioni")
     temp = st.number_input("Temperatura (°C)", -30.0, 50.0, DEFAULTS["temp"], 1.0)
     hum  = st.number_input("Umidità (%)", 0.0, 100.0, DEFAULTS["hum"], 1.0)
     wind = st.number_input("Vento (km/h)", 0.0, 150.0, DEFAULTS["wind"], 1.0)
-    precip = st.selectbox("Precipitazioni", ["assenza pioggia","pioviggine","pioggia","pioggia forte","neve fresca","neve profonda"], index=0)
-    surface = st.selectbox("Fondo", ["asciutto","fango","roccia bagnata","neve dura","ghiaccio"], index=0)
-    expo = st.selectbox("Esposizione", ["misto","ombra","pieno sole"], index=0)
-    tech = st.selectbox("Tecnica", ["facile","normale","roccioso","passaggi di roccia (scrambling)","neve/ghiaccio"], index=1)
-    loadkg = st.number_input("Zaino extra (kg)", 0.0, 40.0, DEFAULTS["loadkg"], 1.0)
+    precip  = st.selectbox("Precipitazioni", PRECIP_OPTIONS, index=0)
+    surface = st.selectbox("Fondo", SURF_OPTIONS, index=0)
+    expo    = st.selectbox("Esposizione", EXPO_OPTIONS, index=1)
+    tech    = st.selectbox("Tecnica", TECH_OPTIONS, index=1)
+    loadkg  = st.number_input("Zaino extra (kg)", 0.0, 40.0, DEFAULTS["loadkg"], 1.0)
 
-# ------------------------------
-# Body
-# ------------------------------
-st.title("v5 — IF + split/orari + esportazione waypoint")
-
-uploaded = st.file_uploader("Carica GPX (trascina qui il file)", type=["gpx"])
-if not uploaded:
+if not file:
+    st.info("Carica un file GPX per iniziare.")
     st.stop()
 
-lat, lon, ele = parse_gpx(uploaded.getvalue())
+raw_bytes = file.read()
+lat, lon, ele = parse_gpx_bytes(raw_bytes, reverse=reverse)
 if len(ele) < 2:
-    st.error("Il GPX non contiene punti quota sufficienti.")
+    st.error("Il GPX non contiene abbastanza punti con quota.")
     st.stop()
 
-res = compute_from_arrays(lat, lon, ele, base, up, down, reverse=inverti)
-fi = compute_if_from_res(
-    res, temp, hum, precip, surface, wind, expo, tech, loadkg
-)
+res = compute_from_arrays(lat, lon, ele, base, up, down, weight_kg=DEFAULTS["weight"])
 
-# metriche in testata
-colA, colB, colC = st.columns(3)
-colA.metric("Distanza (km)", f"{res['tot_km']:.2f}")
-colB.metric("Dislivello + (m)", f"{int(res['dplus'])}")
-colC.metric("Tempo totale", fmt_hm(res["t_total"]))
+# ---- Metriche in alto
+col1, col2, col3 = st.columns(3)
+col1.metric("Distanza (km)", f"{res['tot_km']:.2f}")
+col2.metric("Dislivello + (m)", f"{int(res['dplus'])}")
+col3.metric("Tempo totale", _fmt_hm(res["t_total"]))
 
-# ---------------- Gauge (matplotlib) ----------------
+# ---- IF + gauge
 st.subheader("Indice di Difficoltà")
-st.write(f"**{fi['IF']} ({fi['cat']})**")
+if_res = compute_if_from_res(res, temp, hum, precip, surface, wind, expo, tech, loadkg)
+st.markdown(f"### {if_res['IF']:.1f}  _({if_res['cat']})_")
+st.altair_chart(draw_gauge_altair(if_res['IF']), use_container_width=False)
 
-fig_g, axg = plt.subplots(figsize=(4.8, 1.8))
-axg.set_aspect('equal'); axg.axis('off')
+# ---- Profilo + risultati
+left, right = st.columns([1,2])
 
-bins = [
-    (0,30,"#2ecc71","Facile"),
-    (30,50,"#f1c40f","Medio"),
-    (50,70,"#e67e22","Impeg."),
-    (70,80,"#e74c3c","Diffic."),
-    (80,90,"#8e44ad","Molto diff."),
-    (90,100,"#111111","Estremo"),
-]
-cx, cy, r_o, r_i = 0, 0, 1.0, 0.68
-for a,b,col,_ in bins:
-    ang1 = 180 - (a/100)*180
-    ang2 = 180 - (b/100)*180
-    w = Wedge((cx,cy), r_o, ang2, ang1, width=r_o-r_i, facecolor=col, edgecolor=col)
-    axg.add_patch(w)
-v = max(0.0, min(100.0, fi["IF"]))
-ang = math.radians(180 - (v/100)*180)
-x_tip = cx + r_i*math.cos(ang)
-y_tip = cy + r_i*math.sin(ang)
-axg.plot([cx, x_tip], [cy, y_tip], color="#222", linewidth=3)
-axg.scatter([cx],[cy], s=30, color="#222")
-for a,b,_,lab in bins:
-    m = (a+b)/2
-    angm = math.radians(180 - (m/100)*180)
-    xr = cx + (r_o-0.18)*math.cos(angm)
-    yr = cy + (r_o-0.18)*math.sin(angm)
-    axg.text(xr, yr, lab, fontsize=9, ha='center', va='center')
-axg.text(0, -0.35, f"{fi['IF']:.1f}", fontsize=18, fontweight='bold', ha='center')
-st.pyplot(fig_g, transparent=True)
-
-# ---------------- Dettagli “Risultati” ----------------
-# --- icone sicure (shortcode Markdown) ---
-ok_icon = ":white_check_mark:"
-warn_icon = ":warning:"
-holes_str = f"{ok_icon} 0" if res["holes"] == 0 else f"{warn_icon} {res['holes']}"
-
-st.markdown(
-    f"""
+with left:
+    st.subheader("Risultati")
+    st.markdown(
+        f"""
 - **Dislivello − (m):** {int(res['dneg'])}  
-- **Tempo piano:** {fmt_hm(res['t_dist'])}  
-- **Tempo salita:** {fmt_hm(res['t_up'])}  
-- **Tempo discesa:** {fmt_hm(res['t_down'])}  
-- **Calorie stimate:** ~{int((res['t_total']/60)*300)}  
+- **Tempo piano:** {_fmt_hm(res['t_dist'])}  
+- **Tempo salita:** {_fmt_hm(res['t_up'])}  
+- **Tempo discesa:** {_fmt_hm(res['t_down'])}  
+- **Calorie stimate:** {res['cal_total']}  
 - **Piano (km):** {res['len_flat_km']:.2f} — **Salita (km):** {res['len_up_km']:.2f} — **Discesa (km):** {res['len_down_km']:.2f}  
 - **Pend. media salita (%):** {res['grade_up_pct']:.1f} — **discesa:** {res['grade_down_pct']:.1f}  
 - **LCS ≥25% (m):** {int(res['lcs25_m'])}  
 - **Blocchi ripidi (≥100 m @ ≥25%):** {int(res['blocks25_count'])}  
 - **Surge (cambi ritmo)/km:** {res['surge_idx_per_km']:.2f}  
-- **Buchi GPX:** {holes_str}  
-    """
-)
+- **Buchi GPX:** {res['holes']}
+        """
+    )
 
-# ---------------- Tempi/Orari ai km ----------------
+with right:
+    st.subheader("Profilo altimetrico")
+    km_table, labels_map = per_km_splits(res, base, up, down, start_time, show_orario)
+    labels_for_chart = labels_map if show_labels else None
+    st.altair_chart(plot_profile_altair(res["profile_x_km"], res["profile_y_m"], labels_for_chart),
+                    use_container_width=True)
+
+# ---- Tempi/Orario ai diversi Km
 st.subheader("Tempi/Orario ai diversi Km")
+if km_table.empty:
+    st.info("Traccia più corta di 1 km, nessuno split disponibile.")
+else:
+    # Tabella compatta: solo tre colonne, nessun indice
+    st.dataframe(km_table, use_container_width=True, hide_index=True)
 
-tot_km = res["tot_km"]
-x = np.array(res["profile_x_km"])
-y = np.array(res["profile_y_m"])
-
-pace_flat = base
-minutes = 0.0
-km_marks = np.arange(1, int(math.floor(tot_km))+1)
-split_rows = []
-curr_km_target = 1.0
-last_t = 0.0
-last_dist = 0.0
-for i in range(1, len(x)):
-    seg_m = (x[i]-x[i-1])*1000.0
-    if seg_m <= 0: continue
-    dz = y[i]-y[i-1]
-    if dz > RS_MIN_DELEV:          # salita
-        seg_min = (seg_m/1000.0)*pace_flat + (dz/100.0)*up
-    elif dz < -RS_MIN_DELEV:       # discesa
-        seg_min = (seg_m/1000.0)*pace_flat + ((-dz)/200.0)*down
-    else:                          # piano
-        seg_min = (seg_m/1000.0)*pace_flat
-    minutes += seg_min
-
-    while x[i] >= curr_km_target and curr_km_target <= tot_km + 1e-6:
-        frac = (curr_km_target - x[i-1]) / max(1e-9, (x[i]-x[i-1]))
-        t_mark = last_t + frac * (minutes - last_t)
-        km_index = int(round(curr_km_target))
-        split_rows.append((km_index, t_mark))
-        curr_km_target += 1.0
-    last_t = minutes
-    last_dist = x[i]
-
-start_dt = datetime.combine(datetime.today(), start_time) if show_clock else None
-km_list = []
-for km_i, t_min in split_rows:
-    km_list.append(dict(
-        Km=km_i,
-        **({"Tempo parziale": fmt_hm(t_min)}),
-        **({"Ora del giorno": (start_dt + timedelta(minutes=t_min)).strftime("%H:%M") if start_dt else ""})
-    ))
-df = pd.DataFrame(km_list)
-
-fig, ax = plt.subplots(figsize=(10,3))
-ax.plot(x, y, linewidth=2.0)
-ax.set_xlabel("Distanza (km)")
-ax.set_ylabel("Quota (m)")
-ax.grid(True, linestyle=":", alpha=0.5)
-if show_labels and len(km_list):
-    for row in km_list:
-        km_i = row["Km"]
-        if km_i <= x[-1]:
-            j = np.searchsorted(x, km_i)
-            j = min(max(j,1), len(x)-1)
-            y_km = y[j]
-            label = row["Ora del giorno"] if show_clock else row["Tempo parziale"]
-            ax.text(km_i, y_km, label, ha="center", va="bottom", fontsize=9)
-st.pyplot(fig, use_container_width=True, transparent=True)
-
-st.dataframe(
-    df[["Km","Tempo parziale","Ora del giorno"]],
-    use_container_width=True, hide_index=True, height=min(420, 40*max(1, len(df)))
-)
+    # Export GPX
+    st.write("**Esporta waypoint**")
+    c1, c2 = st.columns(2)
+    with c1:
+        xml_full = build_gpx_with_waypoints(raw_bytes, km_table, use_split=True)
+        st.download_button("GPX con traccia + waypoint (Km - tempo parziale)",
+                           data=xml_full.encode("utf-8"),
+                           file_name=f"{file.name.rsplit('.',1)[0]}_waypoints_split.gpx",
+                           mime="application/gpx+xml")
+    with c2:
+        xml_wpt = build_gpx_waypoints_only(km_table, use_split=True)
+        st.download_button("Solo waypoint (Km - tempo parziale)",
+                           data=xml_wpt.encode("utf-8"),
+                           file_name=f"{file.name.rsplit('.',1)[0]}_waypoints_only_split.gpx",
+                           mime="application/gpx+xml")
