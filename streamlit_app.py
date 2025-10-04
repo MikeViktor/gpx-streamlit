@@ -311,38 +311,18 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     return {"IF": IF, "cat": cat_from_if(IF)}
 
 # ================== Gauge SVG robusto ==================
-import math
+def gauge_svg_html(value: float, width: int = 560, height: int = 200) -> str:
+    """
+    Semigauge 0..100 con settori nel verso corretto (verde→giallo→arancio→rosso→viola→nero).
+    """
+    v = max(0.0, min(100.0, float(value)))
 
-def gauge_svg_html(value, width=540, height=210):
-    """Semicerchio a spicchi pieni + ago; value in [0..100]."""
-    value = max(0, min(100, float(value)))
+    # centro in basso, semicerchio 180°
+    cx, cy = width / 2.0, height - 12.0
+    R_outer = min(width * 0.42, height * 0.95)
+    R_inner = R_outer - 24.0
 
-    cx, cy = width / 2, height - 10
-    ro = min(width * 0.42, (height * 0.92) / 2)      # raggio esterno
-    ri = ro - 22                                     # raggio interno (spessore anello)
-
-    def ang(v):  # 0..100 -> π..0 (semicerchio alto)
-        return math.pi * (1.0 - v / 100.0)
-
-    def pt(a, r):
-        return cx + r * math.cos(a), cy - r * math.sin(a)
-
-    def wedge_path(a0, a1, color):
-        x0, y0 = pt(a0, ro)
-        x1, y1 = pt(a1, ro)
-        xi1, yi1 = pt(a1, ri)
-        xi0, yi0 = pt(a0, ri)
-        laf = 1 if abs(a1 - a0) > math.pi else 0
-        # outer arc: verso destra (clockwise), inner arc: ritorno (counterclockwise)
-        d = (
-            f"M {x0:.1f},{y0:.1f} "
-            f"A {ro:.1f},{ro:.1f} 0 {laf} 0 {x1:.1f},{y1:.1f} "
-            f"L {xi1:.1f},{yi1:.1f} "
-            f"A {ri:.1f},{ri:.1f} 0 {laf} 1 {xi0:.1f},{yi0:.1f} Z"
-        )
-        return d, color
-
-    bins = [
+    bands = [
         (0, 30,  "#2ecc71"),  # Facile
         (30, 50, "#f1c40f"),  # Medio
         (50, 70, "#e67e22"),  # Impegnativo
@@ -351,27 +331,67 @@ def gauge_svg_html(value, width=540, height=210):
         (90, 100,"#111111"),  # Estremo
     ]
 
-    paths = []
-    for a0p, a1p, col in bins:
-        a0, a1 = ang(a0p), ang(a1p)
-        d, col = wedge_path(a0, a1, col)
-        paths.append(f'<path d="{d}" fill="{col}" stroke="{col}" />')
+    def val2ang(pct: float) -> float:
+        # 0% -> 180°, 100% -> 0°
+        return 180.0 - (pct / 100.0) * 180.0
+
+    def polar(r: float, deg: float):
+        rad = math.radians(deg)
+        return (cx + r * math.cos(rad), cy - r * math.sin(rad))
+
+    def ring_segment(a0: float, a1: float, color: str) -> str:
+        """
+        Disegna un settore di anello tra a0 -> a1 in senso orario.
+        Arco esterno sweep=1 (clockwise), arco interno sweep=0 (counterclockwise).
+        """
+        xo0, yo0 = polar(R_outer, a0)
+        xo1, yo1 = polar(R_outer, a1)
+        xi1, yi1 = polar(R_inner, a1)
+        xi0, yi0 = polar(R_inner, a0)
+        large = 1 if abs(a0 - a1) > 180 else 0
+
+        d = (
+            f"M {xo0:.1f},{yo0:.1f} "
+            f"A {R_outer:.1f},{R_outer:.1f} 0 {large} 1 {xo1:.1f},{yo1:.1f} "
+            f"L {xi1:.1f},{yi1:.1f} "
+            f"A {R_inner:.1f},{R_inner:.1f} 0 {large} 0 {xi0:.1f},{yi0:.1f} Z"
+        )
+        return f'<path d="{d}" fill="{color}" stroke="{color}" stroke-width="1"/>'
+
+    # base bianca (opzionale)
+    base = (
+        f'M {polar(R_outer,180)[0]:.1f},{polar(R_outer,180)[1]:.1f} '
+        f'A {R_outer:.1f},{R_outer:.1f} 0 0 1 {polar(R_outer,0)[0]:.1f},{polar(R_outer,0)[1]:.1f} '
+        f'L {polar(R_inner,0)[0]:.1f},{polar(R_inner,0)[1]:.1f} '
+        f'A {R_inner:.1f},{R_inner:.1f} 0 0 0 {polar(R_inner,180)[0]:.1f},{polar(R_inner,180)[1]:.1f} Z'
+    )
+    base = f'<path d="{base}" fill="white" stroke="none"/>'
+
+    segs = []
+    for a, b, col in bands:
+        a0 = val2ang(a); a1 = val2ang(b)
+        if a0 < a1:  # garantiamo a0 > a1
+            a0, a1 = a1, a0
+        segs.append(ring_segment(a0, a1, col))
 
     # ago
-    av = ang(value)
-    nx, ny = pt(av, (ri + ro) / 2)
+    ang = val2ang(v)
+    x_tip, y_tip = polar((R_outer + R_inner) / 2.0, ang)
+    x_end, y_end = polar(R_inner - 6.0, ang)
     needle = (
-        f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="#333" stroke-width="4" />'
-        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="6" fill="#333" />'
+        f'<line x1="{x_end:.1f}" y1="{y_end:.1f}" x2="{x_tip:.1f}" y2="{y_tip:.1f}" stroke="#333" stroke-width="4" />'
+        f'<circle cx="{x_end:.1f}" cy="{y_end:.1f}" r="6" fill="#333"/>'
     )
 
     # valore
-    txt = f'<text x="{cx:.1f}" y="{cy - ri + 36:.1f}" text-anchor="middle" font-size="22" font-weight="600" fill="#000">{value:.1f}</text>'
+    txt = (
+        f'<text x="{x_tip:.1f}" y="{y_tip-10:.1f}" text-anchor="middle" '
+        f'font-family="Segoe UI, Roboto, Arial" font-size="20" font-weight="600" fill="#000">{v:.1f}</text>'
+    )
 
     svg = (
         f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-        f'xmlns="http://www.w3.org/2000/svg">'
-        + "".join(paths) + needle + txt + "</svg>"
+        f'xmlns="http://www.w3.org/2000/svg">{base}{"".join(segs)}{needle}{txt}</svg>'
     )
     return svg
 
@@ -427,12 +447,6 @@ c1,c2,c3 = st.columns(3)
 c1.metric("Distanza (km)", f"{res['tot_km']:.2f}")
 c2.metric("Dislivello + (m)", f"{int(res['dplus'])}")
 c3.metric("Tempo totale", f"{int(res['t_total']//60)}:{int(round(res['t_total']%60)):02d}")
-
-# === Gauge ===
-st.markdown(
-    f'<div style="max-width:620px;margin:12px auto 6px auto;">{gauge_svg_html(fi["IF"])}</div>',
-    unsafe_allow_html=True
-)
 
 # === INDICE DI DIFFICOLTÀ (nuovo layout: titolo/numero a sinistra, gauge a destra) ===
 gc1, gc2 = st.columns([1, 2])
