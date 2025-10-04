@@ -1,13 +1,13 @@
 # streamlit_app.py
-# v5 — IF + split/orari + esport waypoint — settori gauge corretti
+# v5 — IF + split/orari + esport waypoint — settori gauge corretti (no gpxpy)
+
 import io
 import math
 from datetime import datetime, timedelta
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
-import gpxpy
-import gpxpy.gpx
 import streamlit as st
 import matplotlib.pyplot as plt
 from matplotlib.patches import Wedge
@@ -50,6 +50,37 @@ DEFAULTS = dict(
 # ------------------------------
 # Utility/Calcolo
 # ------------------------------
+def _is_tag(e, name: str) -> bool:
+    t = e.tag
+    return t.endswith('}' + name) or t == name
+
+def parse_gpx(file_bytes: bytes):
+    """Parser GPX leggero (ElementTree). Ritorna (lat, lon, ele)."""
+    # decodifica tollerante: alcune app salvano GPX con charset strani
+    data = file_bytes.decode("utf-8", errors="ignore")
+    root = ET.fromstring(data)
+
+    for wanted in ("trkpt", "rtept", "wpt"):
+        lat, lon, ele = [], [], []
+        for el in root.iter():
+            if _is_tag(el, wanted):
+                la = el.attrib.get("lat"); lo = el.attrib.get("lon")
+                if la is None or lo is None:
+                    continue
+                z = None
+                for ch in el:
+                    if _is_tag(ch, "ele"):
+                        z = ch.text; break
+                if z is None:
+                    continue
+                try:
+                    lat.append(float(la)); lon.append(float(lo)); ele.append(float(z))
+                except:
+                    pass
+        if lat:
+            return lat, lon, ele
+    return [], [], []
+
 def dist_km(lat1, lon1, lat2, lon2):
     dy = (lat2 - lat1) * 111.32
     dx = (lon2 - lon1) * 111.32 * math.cos(math.radians((lat1 + lat2) / 2.0))
@@ -146,22 +177,6 @@ def cat_from_if(val: float) -> str:
     if val <= 90: return "Molto difficile"
     return "Estremamente difficile"
 
-def parse_gpx(file_bytes):
-    gpx = gpxpy.parse(io.BytesIO(file_bytes).read().decode("utf-8", errors="ignore"))
-    lat, lon, ele = [], [], []
-    for track in gpx.tracks:
-        for seg in track.segments:
-            for p in seg.points:
-                if p.elevation is not None:
-                    lat.append(p.latitude); lon.append(p.longitude); ele.append(p.elevation)
-    # fallback routes/waypoints
-    if not lat:
-        for rte in gpx.routes:
-            for p in rte.points:
-                if p.elevation is not None:
-                    lat.append(p.latitude); lon.append(p.longitude); ele.append(p.elevation)
-    return lat, lon, ele
-
 def compute_from_arrays(lat, lon, ele_raw,
                         base_min_per_km=15.0, up_min_per_100m=15.0, down_min_per_200m=15.0,
                         reverse=False):
@@ -248,8 +263,8 @@ def compute_from_arrays(lat, lon, ele_raw,
         "surge_idx_per_km": surge_idx,
         "avg_alt_m": sum(ele_raw)/len(ele_raw) if ele_raw else None,
         "profile_x_km": x_km, "profile_y_m": e_sm[:],
-        "loop_fix_applied": bool(loop_fix), "loop_drift_abs_m": round(abs(loop_drift),1),
-        "loop_balance_applied": bool(balance), "loop_like": bool(loop_like), "balance_diff_m": round(diff,1),
+        "loop_fix_applied": False,  # non mostriamo più “corretta deriva”
+        "loop_balance_applied": bool(balance), "loop_like": bool(loop_like), "balance_diff_m": round(abs(dplus-dneg),1),
     }
 
 def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_kmh, expo_it, technique_level, extra_load_kg):
@@ -274,7 +289,35 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     surf_map={"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}
     expo_map={"ombra":"shade","misto":"mixed","pieno sole":"sun"}
 
-    M = meteo_multiplier(temp_c, humidity_pct, precip_map[precip_it], surf_map[surface_it], wind_kmh, expo_map[expo_it]) \
+    def meteo_multiplier(temp_c, humidity_pct, precip, surface, wind_kmh, exposure):
+        if   temp_c < -5: M_temp = 1.20
+        elif temp_c < 0:  M_temp = 1.10
+        elif temp_c < 5:  M_temp = 1.05
+        elif temp_c <= 20:M_temp = 1.00
+        elif temp_c <= 25:M_temp = 1.05
+        elif temp_c <= 30:M_temp = 1.10
+        elif temp_c <= 35:M_temp = 1.20
+        else:             M_temp = 1.35
+        if   humidity_pct > 80: M_temp += 0.10
+        elif humidity_pct > 60: M_temp += 0.05
+        precip_map_i = {"dry":1.00,"drizzle":1.05,"rain":1.15,"heavy_rain":1.30,"snow_shallow":1.25,"snow_deep":1.60}
+        surface_map_i = {"dry":1.00,"mud":1.10,"wet_rock":1.15,"hard_snow":1.30,"ice":1.60}
+        exposure_map_i = {"shade":1.00,"mixed":1.05,"sun":1.10}
+        M_precip  = precip_map_i.get(precip, 1.00)
+        M_surface = surface_map_i.get(surface, 1.00)
+        M_sun     = exposure_map_i.get(exposure, 1.00)
+        if   wind_kmh <= 10: M_wind = 1.00
+        elif wind_kmh <= 20: M_wind = 1.05
+        elif wind_kmh <= 35: M_wind = 1.10
+        elif wind_kmh <= 60: M_wind = 1.20
+        else:                M_wind = 1.35
+        return min(1.4, M_temp * max(M_precip, M_surface) * M_wind * M_sun)
+
+    M = meteo_multiplier(temp_c, humidity_pct,
+                         {"assenza pioggia":"dry","pioviggine":"drizzle","pioggia":"rain","pioggia forte":"heavy_rain","neve fresca":"snow_shallow","neve profonda":"snow_deep"}[precip],
+                         {"asciutto":"dry","fango":"mud","roccia bagnata":"wet_rock","neve dura":"hard_snow","ghiaccio":"ice"}[surface],
+                         wind_kmh,
+                         {"ombra":"shade","misto":"mixed","pieno sole":"sun"}[expo]) \
         * altitude_multiplier(res.get("avg_alt_m")) \
         * technique_multiplier(technique_level) \
         * pack_load_multiplier(extra_load_kg)
@@ -322,7 +365,6 @@ with st.sidebar:
 st.title("v5 — IF + split/orari + esportazione waypoint")
 
 uploaded = st.file_uploader("Carica GPX (trascina qui il file)", type=["gpx"])
-
 if not uploaded:
     st.stop()
 
@@ -349,7 +391,6 @@ st.write(f"**{fi['IF']} ({fi['cat']})**")
 fig_g, axg = plt.subplots(figsize=(4.8, 1.8))
 axg.set_aspect('equal'); axg.axis('off')
 
-# bins left->right
 bins = [
     (0,30,"#2ecc71","Facile"),
     (30,50,"#f1c40f","Medio"),
@@ -358,30 +399,24 @@ bins = [
     (80,90,"#8e44ad","Molto diff."),
     (90,100,"#111111","Estremo"),
 ]
-# geometry
 cx, cy, r_o, r_i = 0, 0, 1.0, 0.68
-# draw wedges (start 180° toward 0°)
 for a,b,col,_ in bins:
     ang1 = 180 - (a/100)*180
     ang2 = 180 - (b/100)*180
     w = Wedge((cx,cy), r_o, ang2, ang1, width=r_o-r_i, facecolor=col, edgecolor=col)
     axg.add_patch(w)
-# needle
 v = max(0.0, min(100.0, fi["IF"]))
 ang = math.radians(180 - (v/100)*180)
 x_tip = cx + r_i*math.cos(ang)
 y_tip = cy + r_i*math.sin(ang)
 axg.plot([cx, x_tip], [cy, y_tip], color="#222", linewidth=3)
 axg.scatter([cx],[cy], s=30, color="#222")
-# labels over arcs
 for a,b,_,lab in bins:
     m = (a+b)/2
     angm = math.radians(180 - (m/100)*180)
     xr = cx + (r_o-0.18)*math.cos(angm)
     yr = cy + (r_o-0.18)*math.sin(angm)
     axg.text(xr, yr, lab, fontsize=9, ha='center', va='center')
-
-# big number
 axg.text(0, -0.35, f"{fi['IF']:.1f}", fontsize=18, fontweight='bold', ha='center')
 st.pyplot(fig_g, transparent=True)
 
@@ -401,20 +436,17 @@ with left:
 - **LCS ≥25% (m):** {int(res['lcs25_m'])}  
 - **Blocchi ripidi (≥100 m @ ≥25%):** {int(res['blocks25_count'])}  
 - **Surge (cambi ritmo)/km:** {res['surge_idx_per_km']:.2f}  
-- **Buchi GPX:** {"✅ 0" if res['holes']==0 else f"⚠️ {res['holes']}"}  
+- **Buchi GPX:** {"✅ 0" if res['holes']==0 else f⚠️ {res['holes']}"}  
         """.replace(",", ".")
     )
 
-# ---------------- Tempi/Orari ai km (grafico & tabella) ----------------
+# ---------------- Tempi/Orari ai km ----------------
 st.subheader("Tempi/Orario ai diversi Km")
 
-# calcolo split km → tempo
 tot_km = res["tot_km"]
 x = np.array(res["profile_x_km"])
 y = np.array(res["profile_y_m"])
 
-# velocità istantanea “equivalente” in funzione di pendenza
-# (stesso modello usato per t_dist/t_up/t_down a step)
 pace_flat = base
 minutes = 0.0
 km_marks = np.arange(1, int(math.floor(tot_km))+1)
@@ -426,18 +458,15 @@ for i in range(1, len(x)):
     seg_m = (x[i]-x[i-1])*1000.0
     if seg_m <= 0: continue
     dz = y[i]-y[i-1]
-    g = dz/seg_m  # pendenza frazionale (es 0.10 = 10%)
     if dz > RS_MIN_DELEV:          # salita
         seg_min = (seg_m/1000.0)*pace_flat + (dz/100.0)*up
     elif dz < -RS_MIN_DELEV:       # discesa
         seg_min = (seg_m/1000.0)*pace_flat + ((-dz)/200.0)*down
-    else:                          # quasi piano
+    else:                          # piano
         seg_min = (seg_m/1000.0)*pace_flat
     minutes += seg_min
 
-    # km mark raggiunta?
     while x[i] >= curr_km_target and curr_km_target <= tot_km + 1e-6:
-        # tempo parziale tra (last_dist -> curr_km_target)
         frac = (curr_km_target - x[i-1]) / max(1e-9, (x[i]-x[i-1]))
         t_mark = last_t + frac * (minutes - last_t)
         km_index = int(round(curr_km_target))
@@ -446,7 +475,6 @@ for i in range(1, len(x)):
     last_t = minutes
     last_dist = x[i]
 
-# tabella
 start_dt = datetime.combine(datetime.today(), start_time) if show_clock else None
 km_list = []
 for km_i, t_min in split_rows:
@@ -457,7 +485,6 @@ for km_i, t_min in split_rows:
     ))
 df = pd.DataFrame(km_list)
 
-# grafico altimetrico con etichette tempi
 fig, ax = plt.subplots(figsize=(10,3))
 ax.plot(x, y, linewidth=2.0)
 ax.set_xlabel("Distanza (km)")
@@ -467,7 +494,6 @@ if show_labels and len(km_list):
     for row in km_list:
         km_i = row["Km"]
         if km_i <= x[-1]:
-            # trova quota vicino al km_i
             j = np.searchsorted(x, km_i)
             j = min(max(j,1), len(x)-1)
             y_km = y[j]
