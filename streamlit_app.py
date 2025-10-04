@@ -311,7 +311,8 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     return {"IF": IF, "cat": cat_from_if(IF)}
 
 # ================== Gauge SVG robusto ==================
-def gauge_svg_html(value: float) -> str:
+def gauge_svg_html(value: float, value_font: int = 32, arc_thickness: int = 44) -> str:
+    # v in [0,100]
     v = max(0.0, min(100.0, float(value)))
     bins = [
         (0,30,"#2ecc71","Facile"),
@@ -321,31 +322,32 @@ def gauge_svg_html(value: float) -> str:
         (80,90,"#8e44ad","Molto diff."),
         (90,100,"#111111","Estremo"),
     ]
+    # dimensioni
     cx, cy = 220, 220
-    r_outer, r_inner = 200, 160
+    r_outer = 200
+    r_inner = r_outer - arc_thickness
 
     def pol(r, ang_deg):
         a = math.radians(ang_deg)
         return cx + r*math.cos(a), cy - r*math.sin(a)
 
     def arc(r, ang_start, ang_end, sweep):
-        # large-arc se differenza > 180
         diff = abs(ang_start - ang_end)
         large = 1 if diff > 180 else 0
         x1,y1 = pol(r, ang_start)
         x2,y2 = pol(r, ang_end)
-        # SVG: A rx ry 0 large sweep x y ; sweep=1 -> senso orario
         return f"M{x1:.1f},{y1:.1f} A{r:.1f},{r:.1f} 0 {large} {sweep} {x2:.1f},{y2:.1f}"
 
     def ring(a,b,col):
-        # 0..100 → 180..0 (semicerchio)
+        # mappa 0..100 -> 180..0
         sa = 180.0 - (a/100.0)*180.0
         sb = 180.0 - (b/100.0)*180.0
-        outer = arc(r_outer, sa, sb, sweep=1)         # orario
+        outer = arc(r_outer, sa, sb, sweep=1)
         xi,yi = pol(r_inner, sb)
-        inner = arc(r_inner, sb, sa, sweep=0)         # anti-orario per tornare
+        inner = arc(r_inner, sb, sa, sweep=0)
         return f'<path d="{outer} L{xi:.1f},{yi:.1f} {inner} Z" fill="{col}" stroke="{col}"/>'
 
+    # ago
     val_ang = 180.0 - (v/100.0)*180.0
     px = cx + (r_inner-6)*math.cos(math.radians(val_ang))
     py = cy - (r_inner-6)*math.sin(math.radians(val_ang))
@@ -356,7 +358,8 @@ def gauge_svg_html(value: float) -> str:
     svg.append(f'<circle cx="{cx}" cy="{cy}" r="{r_inner-2}" fill="white"/>')
     svg.append(f'<line x1="{cx}" y1="{cy}" x2="{px:.1f}" y2="{py:.1f}" stroke="#333" stroke-width="4"/>')
     svg.append(f'<circle cx="{cx}" cy="{cy}" r="6" fill="#333"/>')
-    svg.append(f'<text x="{cx}" y="{cy-25}" text-anchor="middle" font-size="22" font-weight="700">{v:.1f}</text>')
+    # numero più grande e ben centrato
+    svg.append(f'<text x="{cx}" y="{cy-22}" text-anchor="middle" font-size="{value_font}" font-weight="800">{v:.1f}</text>')
     svg.append('</svg>')
     return ''.join(svg)
 
@@ -418,8 +421,64 @@ st.markdown(
     f'<div style="max-width:620px;margin:12px auto 6px auto;">{gauge_svg_html(fi["IF"])}</div>',
     unsafe_allow_html=True
 )
-st.subheader("Indice di Difficoltà")
-st.write(f"**{fi['IF']}** ({fi['cat']})")
+# === INDICE DI DIFFICOLTÀ (nuovo layout: titolo/numero a sinistra, gauge a destra) ===
+gc1, gc2 = st.columns([1, 2])  # [colonna sinistra, colonna destra]
+
+with gc1:
+    st.subheader("Indice di Difficoltà")
+    # Numero grande come le metriche iniziali + categoria sotto
+    st.markdown(
+        f"""
+        <div style="font-size:44px;font-weight:800;line-height:1;margin:2px 0 4px 0;">
+            {fi['IF']:.1f}
+        </div>
+        <div style="font-size:16px;color:#666;margin-top:-2px;">
+            {fi['cat']}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with gc2:
+    # Quadrante SVG (usa la nuova gauge_svg_html() che hai già sostituito)
+    st.markdown(
+        f"""
+        <div style="margin-top:-8px;max-width:640px;margin-left:auto;">
+            {gauge_svg_html(fi['IF'])}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+# === fine blocco indice di difficoltà ===
+# === INDICE DI DIFFICOLTÀ (nuovo layout: titolo/numero a sinistra, gauge a destra) ===
+gc1, gc2 = st.columns([1, 2])  # [colonna sinistra, colonna destra]
+
+with gc1:
+    st.subheader("Indice di Difficoltà")
+    # Numero grande come le metriche iniziali + categoria sotto
+    st.markdown(
+        f"""
+        <div style="font-size:44px;font-weight:800;line-height:1;margin:2px 0 4px 0;">
+            {fi['IF']:.1f}
+        </div>
+        <div style="font-size:16px;color:#666;margin-top:-2px;">
+            {fi['cat']}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with gc2:
+    # Quadrante SVG (usa la nuova gauge_svg_html() che hai già sostituito)
+    st.markdown(
+        f"""
+        <div style="margin-top:-8px;max-width:640px;margin-left:auto;">
+            {gauge_svg_html(fi['IF'])}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+# === fine blocco indice di difficoltà ===
 
 # === Risultati dettagliati ===
 st.subheader("Risultati")
