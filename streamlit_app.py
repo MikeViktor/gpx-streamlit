@@ -394,13 +394,11 @@ def per_segment_minutes(x_m, y_m, base_min_per_km, up_min_per_100m, down_min_per
     return dist_cum, time_cum
 
 def km_splits(dist_cum_m, time_cum_min, tot_km, start_time: dt.time|None):
-    """Intervalli per ogni km intero (1..floor(tot_km))."""
     rows = []
+
     def interp(m):
-        # tempo/min a distanza m
         if m <= 0: return 0.0
         if m >= dist_cum_m[-1]: return time_cum_min[-1]
-        # binario semplice
         lo, hi = 0, len(dist_cum_m)-1
         while lo+1 < hi:
             mid = (lo+hi)//2
@@ -410,20 +408,24 @@ def km_splits(dist_cum_m, time_cum_min, tot_km, start_time: dt.time|None):
         t0, t1 = time_cum_min[lo], time_cum_min[hi]
         u = (m - m0) / max(1e-9, (m1-m0))
         return t0 + u*(t1-t0)
+
     km_int = int(math.floor(tot_km))
     for k in range(1, km_int+1):
         t_curr = interp(k*1000.0)
         t_prev = interp((k-1)*1000.0)
         split = t_curr - t_prev
-        split_str = hm_str(split)
+        rec = {
+            "Km": k,
+            "Tempo parziale": hm_str(split),
+            "Cumulato": hm_str(t_curr),
+        }
         if start_time is not None:
             base_dt = dt.datetime.combine(dt.date.today(), start_time)
-            tm = (base_dt + dt.timedelta(minutes=t_curr)).time()
-            day_str = tm.strftime("%H:%M")
-        else:
-            day_str = ""
-        rows.append(dict(Km=k, **{"Tempo parziale":split_str}, **({"Ora del giorno":day_str} if day_str else {})))
+            rec["Ora del giorno"] = (base_dt + dt.timedelta(minutes=t_curr)).strftime("%H:%M")
+        rows.append(rec)
+
     return pd.DataFrame(rows)
+
 
 # ─────────────────────────────────────────────────────────────
 # Stringhe temporali
@@ -437,44 +439,43 @@ def hm_str(minutes: float):
 # ─────────────────────────────────────────────────────────────
 # Gauge (Altair) semicircolare
 def gauge_chart(value: float):
-    # bins in ordine sinistra->destra
+    # settori 0→100 da sinistra a destra (solo semicirconferenza superiore)
     bins = [
-        (0,30,"#2ecc71","Facile"),
-        (30,50,"#f1c40f","Medio"),
-        (50,70,"#e67e22","Impeg."),
-        (70,80,"#e74c3c","Diffic."),
-        (80,90,"#8e44ad","Molto diff."),
-        (90,100,"#111111","Estremo"),
+        (0, 30,  "#2ecc71", "Facile"),
+        (30, 50, "#f1c40f", "Medio"),
+        (50, 70, "#e67e22", "Impeg."),
+        (70, 80, "#e74c3c", "Diffic."),
+        (80, 90, "#8e44ad", "Molto diff."),
+        (90, 100,"#111111","Estremo"),
     ]
-    # mapping: 0..100 -> angolo 180..0 (radianti)
-    def v2rad(v): return math.radians(180.0 - (v/100.0)*180.0)
 
-    segs = []
-    for a,b,col,label in bins:
-        segs.append(dict(
-            start=v2rad(a), end=v2rad(b),
-            color=col, label=label
-        ))
-    base = alt.Chart(pd.DataFrame(segs)).mark_arc(innerRadius=55, outerRadius=90).encode(
+    def v2deg(v):  # 0..100 -> 180..0 (gradi)
+        return 180.0 - (v/100.0)*180.0
+
+    segs = pd.DataFrame(
+        [dict(start=v2deg(a), end=v2deg(b), color=c) for a,b,c,_ in bins]
+    )
+
+    # base: semicirconferenza colorata
+    base = alt.Chart(segs).mark_arc(innerRadius=55, outerRadius=90).encode(
         theta=alt.Theta("start:Q", stack=None, title=None),
         theta2="end:Q",
         color=alt.Color("color:N", scale=None, legend=None)
-    ).properties(width=260, height=140)
+    ).properties(width=280, height=160).configure_view(strokeWidth=0)
 
-    # puntatore
-    val = float(max(0,min(100,value)))
-    ang = v2rad(val)
-    r0, r1 = 40, 95
-    x0, y0 = 0, 0
-    x1, y1 = r1*math.cos(ang), r1*math.sin(ang)
-    pointer = alt.Chart(pd.DataFrame([dict(x0=x0,y0=y0,x1=x1,y1=y1)])).mark_line(strokeWidth=3,color="#222").encode(
-        x="x0:Q", y="y0:Q", x2="x1:Q", y2="y1:Q"
+    # ago: un “archetto” sottilissimo
+    v = float(np.clip(value, 0, 100))
+    needle = pd.DataFrame([dict(start=v2deg(v)-0.6, end=v2deg(v)+0.6)])
+    pointer = alt.Chart(needle).mark_arc(innerRadius=10, outerRadius=95, color="#222").encode(
+        theta=alt.Theta("start:Q", stack=None), theta2="end:Q"
     )
-    dot = alt.Chart(pd.DataFrame([dict(x=0,y=0)])).mark_circle(size=80,color="#222").encode(x="x:Q",y="y:Q")
 
-    label = alt.Chart(pd.DataFrame([dict(v=f"{val:.1f}")])).mark_text(y=-10, fontSize=16, fontWeight="bold").encode(text="v:N")
+    # valore numerico al centro
+    txt = alt.Chart(pd.DataFrame([dict(v=f"{v:.1f}")])).mark_text(
+        fontSize=16, fontWeight="bold", dy=6
+    ).encode(text="v:N")
 
-    return (base + pointer + dot + label).configure_view(strokeWidth=0)
+    return (base + pointer + txt).configure_view(strokeWidth=0)
 
 # ─────────────────────────────────────────────────────────────
 # Export GPX con waypoint (gpxpy se presente, altrimenti ET)
@@ -642,29 +643,38 @@ with cL:
     )
 
 with cR:
-    st.subheader("Profilo altimetrico")
-    dfp = pd.DataFrame(dict(km=res["profile_x_km"], quota=res["profile_y_m"]))
-    chart = alt.Chart(dfp).mark_line().encode(
-        x=alt.X("km:Q", axis=alt.Axis(title="Distanza (km)", tickMinStep=1)),
-        y=alt.Y("quota:Q", axis=alt.Axis(title="Quota (m)"))
-    ).properties(height=280)
-    # etichette su km interi
-    if show_labels and not splits_df.empty:
-        lab = pd.DataFrame({
-            "km": splits_df["Km"].astype(float),
-            "quota": np.interp(splits_df["Km"].values, dfp["km"].values, dfp["quota"].values),
-            "txt": (splits_df["Tempo parziale"] if "Tempo parziale" in splits_df else "")
-        })
-        chart = chart + alt.Chart(lab).mark_text(dy=-8, fontSize=10).encode(x="km:Q", y="quota:Q", text="txt:N")
-    st.altair_chart(chart, use_container_width=True)
+st.subheader("Profilo altimetrico")
+
+# slider per regolare l'altezza (vedi punto 4)
+prof_h = st.sidebar.slider("Altezza profilo (px)", 220, 600, 320, 10)
+
+dfp = pd.DataFrame(dict(km=res["profile_x_km"], quota=res["profile_y_m"]))
+chart = alt.Chart(dfp).mark_line().encode(
+    x=alt.X(
+        "km:Q",
+        axis=alt.Axis(title="Distanza (km)", tickMinStep=1, labelPadding=8, titlePadding=30)
+    ),
+    y=alt.Y("quota:Q", axis=alt.Axis(title="Quota (m)"))
+).properties(height=prof_h).configure_view(strokeWidth=0)
 
 # ─────────────────────────────────────────────────────────────
 st.subheader("Tempi/Orario ai diversi Km")
-# Tabella compatta (altezza fissa)
 cols = ["Km","Tempo parziale"]
 if show_daytime and "Ora del giorno" in splits_df:
-    cols.append("Ora del giorno")
-st.dataframe(splits_df[cols], height=320, use_container_width=True)
+    cols += ["Ora del giorno"]
+else:
+    cols += ["Cumulato"]
+st.dataframe(
+    splits_df[cols],
+    height=320, use_container_width=True,
+    column_config={
+        "Km": st.column_config.NumberColumn("Km", width="small"),
+        "Tempo parziale": st.column_config.TextColumn("Tempo parziale", width="small"),
+        ("Ora del giorno" if show_daytime else "Cumulato"): st.column_config.TextColumn(
+            ("Ora del giorno" if show_daytime else "Cumulato"), width="small"
+        )
+    }
+)
 
 # ─────────────────────────────────────────────────────────────
 # Download GPX con waypoint
