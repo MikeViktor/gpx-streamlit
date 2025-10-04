@@ -450,35 +450,6 @@ with gc2:
         unsafe_allow_html=True
     )
 # === fine blocco indice di difficoltà ===
-# === INDICE DI DIFFICOLTÀ (nuovo layout: titolo/numero a sinistra, gauge a destra) ===
-gc1, gc2 = st.columns([1, 2])  # [colonna sinistra, colonna destra]
-
-with gc1:
-    st.subheader("Indice di Difficoltà")
-    # Numero grande come le metriche iniziali + categoria sotto
-    st.markdown(
-        f"""
-        <div style="font-size:44px;font-weight:800;line-height:1;margin:2px 0 4px 0;">
-            {fi['IF']:.1f}
-        </div>
-        <div style="font-size:16px;color:#666;margin-top:-2px;">
-            {fi['cat']}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-with gc2:
-    # Quadrante SVG (usa la nuova gauge_svg_html() che hai già sostituito)
-    st.markdown(
-        f"""
-        <div style="margin-top:-8px;max-width:640px;margin-left:auto;">
-            {gauge_svg_html(fi['IF'])}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-# === fine blocco indice di difficoltà ===
 
 # === Risultati dettagliati ===
 st.subheader("Risultati")
