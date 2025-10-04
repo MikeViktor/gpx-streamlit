@@ -1,7 +1,25 @@
 # -*- coding: utf-8 -*-
 import math, io, xml.etree.ElementTree as ET
 from datetime import timedelta
+# --- guardia facoltativa per librerie mancanti ---
 import streamlit as st
+
+def _ensure_deps():
+    try:
+        import numpy as _np          # noqa: F401
+        import matplotlib.pyplot as _plt   # noqa: F401
+    except ModuleNotFoundError as e:
+        pkg = str(e).split("'")[1]
+        st.error(
+            f"Manca la libreria **{pkg}**. "
+            f"Installa i pacchetti richiesti (es. `pip install {pkg}`) "
+            f"o aggiungili al `requirements.txt` del repo."
+        )
+        st.stop()
+
+_ensure_deps()
+# --- fine guardia facoltativa ---
+
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 
