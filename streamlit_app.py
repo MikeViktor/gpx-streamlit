@@ -421,24 +421,26 @@ axg.text(0, -0.35, f"{fi['IF']:.1f}", fontsize=18, fontweight='bold', ha='center
 st.pyplot(fig_g, transparent=True)
 
 # ---------------- Dettagli “Risultati” ----------------
-st.subheader("Risultati")
-left, right = st.columns([1,2])
-with left:
-    st.markdown(
-        f"""
+# --- icone sicure (shortcode Markdown) ---
+ok_icon = ":white_check_mark:"
+warn_icon = ":warning:"
+holes_str = f"{ok_icon} 0" if res["holes"] == 0 else f"{warn_icon} {res['holes']}"
+
+st.markdown(
+    f"""
 - **Dislivello − (m):** {int(res['dneg'])}  
 - **Tempo piano:** {fmt_hm(res['t_dist'])}  
 - **Tempo salita:** {fmt_hm(res['t_up'])}  
 - **Tempo discesa:** {fmt_hm(res['t_down'])}  
-- **Calorie stimate:** ~{int( (res['t_total']/60)*300 ):,}  
+- **Calorie stimate:** ~{int((res['t_total']/60)*300)}  
 - **Piano (km):** {res['len_flat_km']:.2f} — **Salita (km):** {res['len_up_km']:.2f} — **Discesa (km):** {res['len_down_km']:.2f}  
 - **Pend. media salita (%):** {res['grade_up_pct']:.1f} — **discesa:** {res['grade_down_pct']:.1f}  
 - **LCS ≥25% (m):** {int(res['lcs25_m'])}  
 - **Blocchi ripidi (≥100 m @ ≥25%):** {int(res['blocks25_count'])}  
 - **Surge (cambi ritmo)/km:** {res['surge_idx_per_km']:.2f}  
-- **Buchi GPX:** {"✅ 0" if res['holes']==0 else f⚠️ {res['holes']}"}  
-        """.replace(",", ".")
-    )
+- **Buchi GPX:** {holes_str}  
+    """
+)
 
 # ---------------- Tempi/Orari ai km ----------------
 st.subheader("Tempi/Orario ai diversi Km")
