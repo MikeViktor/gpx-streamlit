@@ -311,57 +311,69 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     return {"IF": IF, "cat": cat_from_if(IF)}
 
 # ================== Gauge SVG robusto ==================
-def gauge_svg_html(value: float, value_font: int = 32, arc_thickness: int = 44) -> str:
-    # v in [0,100]
-    v = max(0.0, min(100.0, float(value)))
+import math
+
+def gauge_svg_html(value, width=540, height=210):
+    """Semicerchio a spicchi pieni + ago; value in [0..100]."""
+    value = max(0, min(100, float(value)))
+
+    cx, cy = width / 2, height - 10
+    ro = min(width * 0.42, (height * 0.92) / 2)      # raggio esterno
+    ri = ro - 22                                     # raggio interno (spessore anello)
+
+    def ang(v):  # 0..100 -> π..0 (semicerchio alto)
+        return math.pi * (1.0 - v / 100.0)
+
+    def pt(a, r):
+        return cx + r * math.cos(a), cy - r * math.sin(a)
+
+    def wedge_path(a0, a1, color):
+        x0, y0 = pt(a0, ro)
+        x1, y1 = pt(a1, ro)
+        xi1, yi1 = pt(a1, ri)
+        xi0, yi0 = pt(a0, ri)
+        laf = 1 if abs(a1 - a0) > math.pi else 0
+        # outer arc: verso destra (clockwise), inner arc: ritorno (counterclockwise)
+        d = (
+            f"M {x0:.1f},{y0:.1f} "
+            f"A {ro:.1f},{ro:.1f} 0 {laf} 0 {x1:.1f},{y1:.1f} "
+            f"L {xi1:.1f},{yi1:.1f} "
+            f"A {ri:.1f},{ri:.1f} 0 {laf} 1 {xi0:.1f},{yi0:.1f} Z"
+        )
+        return d, color
+
     bins = [
-        (0,30,"#2ecc71","Facile"),
-        (30,50,"#f1c40f","Medio"),
-        (50,70,"#e67e22","Impeg."),
-        (70,80,"#e74c3c","Diffic."),
-        (80,90,"#8e44ad","Molto diff."),
-        (90,100,"#111111","Estremo"),
+        (0, 30,  "#2ecc71"),  # Facile
+        (30, 50, "#f1c40f"),  # Medio
+        (50, 70, "#e67e22"),  # Impegnativo
+        (70, 80, "#e74c3c"),  # Difficile
+        (80, 90, "#8e44ad"),  # Molto difficile
+        (90, 100,"#111111"),  # Estremo
     ]
-    # dimensioni
-    cx, cy = 220, 220
-    r_outer = 200
-    r_inner = r_outer - arc_thickness
 
-    def pol(r, ang_deg):
-        a = math.radians(ang_deg)
-        return cx + r*math.cos(a), cy - r*math.sin(a)
-
-    def arc(r, ang_start, ang_end, sweep):
-        diff = abs(ang_start - ang_end)
-        large = 1 if diff > 180 else 0
-        x1,y1 = pol(r, ang_start)
-        x2,y2 = pol(r, ang_end)
-        return f"M{x1:.1f},{y1:.1f} A{r:.1f},{r:.1f} 0 {large} {sweep} {x2:.1f},{y2:.1f}"
-
-    def ring(a,b,col):
-        # mappa 0..100 -> 180..0
-        sa = 180.0 - (a/100.0)*180.0
-        sb = 180.0 - (b/100.0)*180.0
-        outer = arc(r_outer, sa, sb, sweep=1)
-        xi,yi = pol(r_inner, sb)
-        inner = arc(r_inner, sb, sa, sweep=0)
-        return f'<path d="{outer} L{xi:.1f},{yi:.1f} {inner} Z" fill="{col}" stroke="{col}"/>'
+    paths = []
+    for a0p, a1p, col in bins:
+        a0, a1 = ang(a0p), ang(a1p)
+        d, col = wedge_path(a0, a1, col)
+        paths.append(f'<path d="{d}" fill="{col}" stroke="{col}" />')
 
     # ago
-    val_ang = 180.0 - (v/100.0)*180.0
-    px = cx + (r_inner-6)*math.cos(math.radians(val_ang))
-    py = cy - (r_inner-6)*math.sin(math.radians(val_ang))
+    av = ang(value)
+    nx, ny = pt(av, (ri + ro) / 2)
+    needle = (
+        f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="#333" stroke-width="4" />'
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="6" fill="#333" />'
+    )
 
-    svg = [f'<svg viewBox="0 0 440 260" width="100%" height="200" xmlns="http://www.w3.org/2000/svg">']
-    for a,b,c,_ in bins:
-        svg.append(ring(a,b,c))
-    svg.append(f'<circle cx="{cx}" cy="{cy}" r="{r_inner-2}" fill="white"/>')
-    svg.append(f'<line x1="{cx}" y1="{cy}" x2="{px:.1f}" y2="{py:.1f}" stroke="#333" stroke-width="4"/>')
-    svg.append(f'<circle cx="{cx}" cy="{cy}" r="6" fill="#333"/>')
-    # numero più grande e ben centrato
-    svg.append(f'<text x="{cx}" y="{cy-22}" text-anchor="middle" font-size="{value_font}" font-weight="800">{v:.1f}</text>')
-    svg.append('</svg>')
-    return ''.join(svg)
+    # valore
+    txt = f'<text x="{cx:.1f}" y="{cy - ri + 36:.1f}" text-anchor="middle" font-size="22" font-weight="600" fill="#000">{value:.1f}</text>'
+
+    svg = (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        + "".join(paths) + needle + txt + "</svg>"
+    )
+    return svg
 
 # ================== UI ==================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -421,15 +433,16 @@ st.markdown(
     f'<div style="max-width:620px;margin:12px auto 6px auto;">{gauge_svg_html(fi["IF"])}</div>',
     unsafe_allow_html=True
 )
+
 # === INDICE DI DIFFICOLTÀ (nuovo layout: titolo/numero a sinistra, gauge a destra) ===
-gc1, gc2 = st.columns([1, 2])  # [colonna sinistra, colonna destra]
+gc1, gc2 = st.columns([1, 2])
 
 with gc1:
     st.subheader("Indice di Difficoltà")
-    # Numero grande come le metriche iniziali + categoria sotto
+    # Numero grande ma NON in grassetto
     st.markdown(
         f"""
-        <div style="font-size:44px;font-weight:800;line-height:1;margin:2px 0 4px 0;">
+        <div style="font-size:44px;font-weight:400;line-height:1;margin:2px 0 4px 0;">
             {fi['IF']:.1f}
         </div>
         <div style="font-size:16px;color:#666;margin-top:-2px;">
@@ -440,7 +453,6 @@ with gc1:
     )
 
 with gc2:
-    # Quadrante SVG (usa la nuova gauge_svg_html() che hai già sostituito)
     st.markdown(
         f"""
         <div style="margin-top:-8px;max-width:640px;margin-left:auto;">
@@ -450,6 +462,8 @@ with gc2:
         unsafe_allow_html=True
     )
 # === fine blocco indice di difficoltà ===
+
+
 
 # === Risultati dettagliati ===
 st.subheader("Risultati")
