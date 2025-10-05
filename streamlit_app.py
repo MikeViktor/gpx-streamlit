@@ -432,35 +432,57 @@ expo   = st.sidebar.selectbox("Esposizione", EXPO_OPTIONS, index=EXPO_OPTIONS.in
 tech   = st.sidebar.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(DEFAULTS["tech"]))
 loadkg = st.sidebar.number_input("Zaino extra (kg)", 0.0, 40.0, DEFAULTS["loadkg"], 1.0)
 
-uploaded = st.file_uploader("Trascina qui il file GPX", type=["gpx"])
-have_data = uploaded is not None
+# --- Uploader + calcolo con modalità placeholder ---
+uploaded   = st.file_uploader("Trascina qui il file GPX", type=["gpx"])
+have_data  = uploaded is not None
+res, fi    = None, None
 
 if have_data:
     try:
         data = uploaded.read()
-        lat,lon,ele = parse_gpx_bytes(data)
+        lat, lon, ele = parse_gpx_bytes(data)
         if len(ele) < 2:
-            st.error("Il GPX non contiene quote utili.")
             have_data = False
+            st.warning("Il GPX non contiene quote utili. Mostro solo il layout.")
         else:
-            res = compute_from_arrays(lat,lon,ele, base, up, down, DEFAULTS["weight"], rev)
-            fi  = compute_if_from_res(res, temp, hum, precip, surface, wind, expo, tech, loadkg)
+            # calcoli reali
+            res = compute_from_arrays(
+                lat, lon, ele,
+                base_min_per_km=base,
+                up_min_per_100m=up,
+                down_min_per_200m=down,
+                weight_kg=DEFAULTS["weight"],
+                reverse=rev
+            )
+            fi  = compute_if_from_res(
+                res,
+                temp_c=temp, humidity_pct=hum,
+                precip_it=precip, surface_it=surface,
+                wind_kmh=wind, expo_it=expo,
+                technique_level=tech, extra_load_kg=loadkg
+            )
     except Exception as e:
-        st.error(f"Errore calcolo: {e}")
         have_data = False
+        st.warning(f"Impossibile calcolare: {e}. Mostro solo il layout.")
 
 if not have_data:
-    # segnaposto coerenti (campi presenti ma senza numeri)
+    # placeholder per far vedere layout, gauge e tabella
     res = {
         "tot_km": 0.0, "dplus": 0.0, "dneg": 0.0,
         "t_dist": 0.0, "t_up": 0.0, "t_down": 0.0, "t_total": 0.0,
+        "holes": 0,
         "len_flat_km": 0.0, "len_up_km": 0.0, "len_down_km": 0.0,
         "grade_up_pct": 0.0, "grade_down_pct": 0.0,
-        "lcs25_m": 0.0, "blocks25_count": 0, "surge_idx_per_km": 0.0,
-        "holes": 0,
-        "profile_x_km": [0.0, 1.0], "profile_y_m": [0.0, 0.0],
+        "cal_total": 0,
+        "asc_bins_m": [0,0,0,0,0], "desc_bins_m": [0,0,0,0,0],
+        "lcs25_m": 0, "blocks25_count": 0, "surge_idx_per_km": 0.0,
+        "avg_alt_m": None,
+        # profilo “vuoto” per mostrare la griglia
+        "profile_x_km": list(np.linspace(0, 10, 41)),  # 0..10 km
+        "profile_y_m": [0.0]*41,
     }
-    fi = {"IF": 0.0, "cat": "-"}
+    fi = {"IF": 0.0, "cat": "—"}
+
 
 # === Testate: Distanza, D+ e Tempo totale ===
 c1,c2,c3 = st.columns(3)
