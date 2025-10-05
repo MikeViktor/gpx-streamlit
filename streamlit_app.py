@@ -8,8 +8,8 @@ import altair as alt
 import streamlit as st
 
 # ================== Costanti e default (come gpx_gui.py) ==================
-APP_TITLE = "Tempo percorrenza sentiero — web"
-APP_VER   = "v5 (allineata ai calcoli desktop)"
+APP_TITLE = "TrailLab — analisi GPX: tempi e indice di difficoltà "
+APP_VER   = "v5 "
 
 # Ricampionamento / filtri
 RS_STEP_M     = 3.0
