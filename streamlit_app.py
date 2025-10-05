@@ -9,7 +9,7 @@ import streamlit as st
 
 # ================== Costanti e default (come gpx_gui.py) ==================
 APP_TITLE = "Tempo percorrenza sentiero — web"
-APP_VER   = "v5 (allineata ai calcoli desktop)"
+APP_VER   = "v5.1 (larghezza grafico + esagerazione verticale)"
 
 # Ricampionamento / filtri
 RS_STEP_M     = 3.0
@@ -361,11 +361,10 @@ def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_label
     segs = []
     for a, b, col, _lab in bands:
         a0 = val2ang(a); a1 = val2ang(b)
-        if a0 < a1:  # garantiamo a0 > a1
+        if a0 < a1:
             a0, a1 = a1, a0
         segs.append(ring_segment(a0, a1, col))
 
-    # Ago dal centro
     ang = val2ang(v)
     x_tip, y_tip = polar(R_outer - 8.0, ang)
     needle = (
@@ -409,11 +408,12 @@ show_daytime = st.sidebar.checkbox("Mostra orario del giorno", value=True)
 show_labels  = st.sidebar.checkbox("Mostra etichette sul grafico", value=True)
 start_time   = st.sidebar.time_input("Orario di partenza", value=dt.time(8,0))
 
-# Profilo altimetrico: compressione X e altezza
+# Profilo altimetrico: dimensioni + esagerazione
 st.sidebar.subheader("Profilo altimetrico")
-comp   = st.sidebar.slider("Compressione asse X (km per unità)", 0.25, 5.0, 1.00, 0.05,
-                           help=">1 = grafico più stretto (pendenze appaiono più ripide). Non altera i calcoli.")
-plot_h = st.sidebar.slider("Altezza grafico (px)", 240, 600, 360, 10)
+plot_w = st.sidebar.slider("Larghezza grafico (px)", 480, 1600, 1000, 20)
+plot_h = st.sidebar.slider("Altezza grafico (px)",   240,  700,  360, 10)
+y_exag = st.sidebar.slider("Esagerazione verticale (×)", 0.5, 4.0, 1.0, 0.1,
+                           help="Moltiplica le quote solo per la resa grafica.")
 
 st.sidebar.subheader("Parametri di passo (min)")
 base = st.sidebar.number_input("Min/km (piano)",  5.0, 60.0, DEFAULTS["base"], 0.5)
@@ -437,7 +437,6 @@ res, fi    = None, None
 
 if have_data:
     try:
-        # lettura robusta (evita il problema ai rerun)
         data = uploaded.getvalue() if hasattr(uploaded, "getvalue") else uploaded.read()
         lat, lon, ele = parse_gpx_bytes(data)
         if len(ele) < 2:
@@ -501,7 +500,6 @@ with gc1:
         )
 
 with gc2:
-    # gauge sempre visibile (0 se placeholder)
     gauge_val = fi["IF"] if (have_data and fi) else 0.0
     st.markdown(
         f"""
@@ -545,47 +543,39 @@ else:
         st.write("- **Surge (cambi ritmo)/km:** -")
         st.write("- **Buchi GPX:** -")
 
-# === Profilo altimetrico (sempre visibile) ===
+# === Profilo altimetrico ===
 st.subheader("Profilo altimetrico")
 
 if have_data and res:
-    x = res["profile_x_km"]; y = res["profile_y_m"]
+    x = res["profile_x_km"]
+    y = [v * y_exag for v in res["profile_y_m"]]  # esagerazione verticale SOLO grafica
 else:
-    # placeholder: 0..10 km, quota piatta
     x = [i for i in range(11)]
     y = [0 for _ in x]
 
-# compressione ascissa
-km_plot = [v/comp for v in x]
-df = pd.DataFrame({"km_plot": km_plot, "ele": y})
+df = pd.DataFrame({"km": x, "ele": y})
 
-# tick a km interi sui valori "plot" corrispondenti
+# ticks a km interi
 if have_data and res:
-    km_ticks_real = list(range(0, int(math.ceil(res["tot_km"])) + 1))
+    km_ticks = list(range(0, int(math.ceil(res["tot_km"])) + 1))
 else:
-    km_ticks_real = list(range(0, 11))
-km_ticks_plot = [k/comp for k in km_ticks_real]
+    km_ticks = list(range(0, 11))
 
-# line
 line = alt.Chart(df).mark_line().encode(
-    x=alt.X("km_plot:Q",
-            axis=alt.Axis(
-                title="Distanza (km)",
-                values=km_ticks_plot,
-                labelExpr=f"format(datum.value*{comp}, '.0f')",  # mostra i km reali
-                labelPadding=6
-            )),
+    x=alt.X("km:Q",
+            axis=alt.Axis(title="Distanza (km)", values=km_ticks, labelPadding=6)),
     y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)"))
-).properties(height=plot_h)
+).properties(width=plot_w, height=plot_h)
+
+chart = line
 
 # etichette km/tempo se disponibili
-chart = line
 if have_data and res:
     # tempi cumulati per etichette
     step_km = RS_STEP_M/1000.0
     dt_steps=[0.0]
-    for i in range(1,len(y)):
-        dz = y[i]-y[i-1]
+    for i in range(1,len(res["profile_y_m"])):
+        dz = res["profile_y_m"][i]-res["profile_y_m"][i-1]
         t_flat = base * step_km
         t_up   = up   * max(0.0, dz)/100.0
         t_down = down * max(0.0,-dz)/200.0
@@ -593,11 +583,10 @@ if have_data and res:
     cum = np.cumsum(dt_steps)
 
     ann=[]
-    for k in km_ticks_real:
-        # trova indice del km reale più vicino
+    for k in km_ticks:
         idx = int(np.argmin(np.abs(np.array(x) - k)))
-        yk = float(y[idx])
-        t  = float(cum[idx])
+        yk  = float(df.loc[idx, "ele"])  # già con y_exag
+        t   = float(cum[idx])
         if show_daytime:
             base_dt = dt.datetime.combine(dt.date.today(), start_time)
             txt = (base_dt + dt.timedelta(minutes=t)).strftime("%H:%M")
@@ -605,27 +594,28 @@ if have_data and res:
             hh = int(t//60); mm = int(round(t - hh*60))
             if mm==60: hh+=1; mm=0
             txt = f"{hh}:{mm:02d}"
-        ann.append({"km_plot": float(k/comp), "ele": yk, "top": f"{k} km", "bot": txt})
+        ann.append({"km": float(k), "ele": yk, "top": f"{k} km", "bot": txt})
     ann_df = pd.DataFrame(ann)
 
     if show_labels:
         text1 = alt.Chart(ann_df).mark_text(fontSize=12, dy=-14, fontWeight="bold").encode(
-            x="km_plot:Q", y="ele:Q", text="top:N")
+            x="km:Q", y="ele:Q", text="top:N")
         text2 = alt.Chart(ann_df).mark_text(fontSize=12, dy=12).encode(
-            x="km_plot:Q", y="ele:Q", text="bot:N")
-        chart = alt.layer(line, text1, text2).resolve_scale(y='shared')
+            x="km:Q", y="ele:Q", text="bot:N")
+        chart = alt.layer(line, text1, text2).resolve_scale(y='shared').properties(width=plot_w, height=plot_h)
 
-st.altair_chart(chart, use_container_width=True)
+st.altair_chart(chart, use_container_width=False)
 
 # === Tabella split per km ===
 st.subheader("Tempi / Orario ai diversi Km")
 
 if have_data and res:
-    # ricalcolo cum come sopra
+    # ricalcolo cum sui dati NON esagerati
     step_km = RS_STEP_M/1000.0
     dt_steps=[0.0]
-    for i in range(1,len(y)):
-        dz = y[i]-y[i-1]
+    y_raw = res["profile_y_m"]
+    for i in range(1,len(y_raw)):
+        dz = y_raw[i]-y_raw[i-1]
         t_flat = base * step_km
         t_up   = up   * max(0.0, dz)/100.0
         t_down = down * max(0.0,-dz)/200.0
@@ -633,8 +623,8 @@ if have_data and res:
     cum = np.cumsum(dt_steps)
 
     rows=[]
-    for i in range(1, len(km_ticks_real)):
-        k = km_ticks_real[i]
+    for i in range(1, len(km_ticks)):
+        k = km_ticks[i]
         idx_k   = int(np.argmin(np.abs(np.array(x) - k)))
         idx_km1 = int(np.argmin(np.abs(np.array(x) - (k-1))))
         t_cum = float(cum[idx_k]); t_prev = float(cum[idx_km1]); t_split = t_cum - t_prev
