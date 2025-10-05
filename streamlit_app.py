@@ -9,7 +9,7 @@ import streamlit as st
 
 # ================== Costanti e default (come gpx_gui.py) ==================
 APP_TITLE = "Tempo percorrenza sentiero — web"
-APP_VER   = "v5 (allineata ai calcoli desktop)"
+APP_VER   = "v5.1 (placeholder + compressione asse X)"
 
 # Ricampionamento / filtri
 RS_STEP_M     = 3.0
@@ -208,7 +208,8 @@ def compute_from_arrays(lat, lon, ele_raw,
             elif g<30: asc_bins[2]+=seg
             elif g<40: asc_bins[3]+=seg
             else:      asc_bins[4]+=seg
-            if g>=25: current_run+=seg; longest_steep_run=max(longest_steep_run,current_run); state=2
+            if g>=25:
+                current_run+=seg; longest_steep_run=max(longest_steep_run,current_run); state=2
             else:
                 if current_run>=100: blocks25+=1
                 current_run=0.0; state=1 if g<15 else 0
@@ -270,8 +271,8 @@ def compute_from_arrays(lat, lon, ele_raw,
         "surge_idx_per_km": surge_idx,
         "avg_alt_m": sum(ele_raw)/len(ele_raw) if ele_raw else None,
         "profile_x_km": x_km, "profile_y_m": e_sm[:],
-        "loop_fix_applied": False, "loop_drift_abs_m": 0.0,
-        "loop_balance_applied": balance, "loop_like": loop_like, "balance_diff_m": float(diff),
+        "loop_fix_applied": bool(loop_fix), "loop_drift_abs_m": round(abs(loop_drift),1),
+        "loop_balance_applied": bool(balance), "loop_like": bool(loop_like), "balance_diff_m": round(diff,1),
     }
 
 def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_kmh, expo_it, technique_level, extra_load_kg):
@@ -292,7 +293,7 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
 
     S=(W_D*D_km + W_PLUS*(Dp/100.0) + W_COMP*(C/100.0) +
        W_STEEP*(100.0*f_up25) + W_STEEP_D*(100.0*f_down25) +
-        W_LCS*lcs_sc + W_BLOCKS*blocks + W_SURGE*surge)
+       W_LCS*lcs_sc + W_BLOCKS*blocks + W_SURGE*surge)
 
     IF_base=100.0*(1.0 - math.exp(-S/max(1e-6,IF_S0)))
 
@@ -313,6 +314,7 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
 # ================== Gauge SVG (spicchi pieni + ago dal centro) ==================
 def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_labels: bool = True) -> str:
     v = max(0.0, min(100.0, float(value)))
+
     cx, cy = width / 2.0, height - 12.0
     R_outer = min(width * 0.42, height * 0.95)
     R_inner = R_outer - 24.0
@@ -347,19 +349,31 @@ def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_label
         )
         return f'<path d="{d}" fill="{color}" stroke="{color}" stroke-width="1"/>'
 
+    base_path = (
+        f'M {polar(R_outer,180)[0]:.1f},{polar(R_outer,180)[1]:.1f} '
+        f'A {R_outer:.1f},{R_outer:.1f} 0 0 1 {polar(R_outer,0)[0]:.1f},{polar(R_outer,0)[1]:.1f} '
+        f'L {polar(R_inner,0)[0]:.1f},{polar(R_inner,0)[1]:.1f} '
+        f'A {R_inner:.1f},{R_inner:.1f} 0 0 0 {polar(R_inner,180)[0]:.1f},{polar(R_inner,180)[1]:.1f} Z'
+    )
+    base = f'<path d="{base_path}" fill="white" stroke="none"/>'
+
     segs = []
-    for a, b, col, _lab in bands:
+    for a, b, col, _ in bands:
         a0 = val2ang(a); a1 = val2ang(b)
-        if a0 < a1:  # garantiamo ordine
-            a0, a1 = a1, a0
+        if a0 < a1: a0, a1 = a1, a0
         segs.append(ring_segment(a0, a1, col))
 
-    # Ago lungo dal centro
+    # ago
     ang = val2ang(v)
     x_tip, y_tip = polar(R_outer - 8.0, ang)
     needle = (
         f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x_tip:.1f}" y2="{y_tip:.1f}" stroke="#333" stroke-width="5" />'
         f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="7" fill="#333"/>'
+    )
+    # valore vicino alla punta
+    txt_val = (
+        f'<text x="{x_tip:.1f}" y="{y_tip-10:.1f}" text-anchor="middle" '
+        f'font-family="Segoe UI, Roboto, Arial" font-size="20" font-weight="600" fill="#000">{v:.1f}</text>'
     )
 
     labels_svg = ""
@@ -376,7 +390,7 @@ def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_label
 
     svg = (
         f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-        f'xmlns="http://www.w3.org/2000/svg">{"".join(segs)}{needle}{labels_svg}</svg>'
+        f'xmlns="http://www.w3.org/2000/svg">{base}{"".join(segs)}{needle}{txt_val}{labels_svg}</svg>'
     )
     return svg
 
@@ -390,7 +404,7 @@ rev = st.sidebar.checkbox("Inverti traccia", value=DEFAULTS["reverse"])
 
 st.sidebar.subheader("Tempi per km")
 show_daytime = st.sidebar.checkbox("Mostra orario del giorno", value=True)
-show_labels_graph  = st.sidebar.checkbox("Mostra etichette sul grafico", value=True)
+show_labels  = st.sidebar.checkbox("Mostra etichette sul grafico", value=True)
 start_time   = st.sidebar.time_input("Orario di partenza", value=dt.time(8,0))
 
 st.sidebar.subheader("Parametri di passo (min)")
@@ -408,78 +422,60 @@ expo   = st.sidebar.selectbox("Esposizione", EXPO_OPTIONS, index=EXPO_OPTIONS.in
 tech   = st.sidebar.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(DEFAULTS["tech"]))
 loadkg = st.sidebar.number_input("Zaino extra (kg)", 0.0, 40.0, DEFAULTS["loadkg"], 1.0)
 
-st.sidebar.subheader("Aspetto profilo")
-graph_width_ratio = st.sidebar.slider(
-    "Larghezza grafico", 2, 5, 4,
-    help="Allarga o restringi il riquadro del profilo (implica l'asse X)."
-)
-x_compress = st.sidebar.slider(
-    "Compressione orizzontale (X)", 0.5, 5.0, 1.0, 0.1,
-    help="Valori >1 comprimono la distanza sull'asse X (pendenze più 'ripide' visivamente)."
-)
-auto_proportion = st.sidebar.checkbox(
-    "Proporziona distanza a elevazione (auto)", value=False,
-    help="Calcola automaticamente una compressione X basata sul rapporto distanza/dislivello (≈ 45° per ~100% di pendenza, ignorando i pixel del contenitore)."
-)
+st.sidebar.subheader("Profilo altimetrico")
+comp      = st.sidebar.slider("Compressione orizzontale (×)", 0.5, 5.0, 1.0, 0.1,
+                              help="Riduce l'asse Distanza per enfatizzare le pendenze (x/comp).")
+chart_h   = st.sidebar.slider("Altezza grafico (px)", 240, 600, 360, 10)
 
-# --- Uploader + calcolo con modalità placeholder ---
 uploaded   = st.file_uploader("Trascina qui il file GPX", type=["gpx"])
 have_data  = uploaded is not None
-res, fi    = None, None
 
+# === Parse + calcolo (o placeholder) ===
+res, fi = None, None
 if have_data:
     try:
         data = uploaded.getvalue() if hasattr(uploaded, "getvalue") else uploaded.read()
-        lat, lon, ele = parse_gpx_bytes(data)
+        lat,lon,ele = parse_gpx_bytes(data)
         if len(ele) < 2:
             have_data = False
             st.warning("Il GPX non contiene quote utili. Mostro solo il layout.")
         else:
-            res = compute_from_arrays(
-                lat, lon, ele,
-                base_min_per_km=base,
-                up_min_per_100m=up,
-                down_min_per_200m=down,
-                weight_kg=DEFAULTS["weight"],
-                reverse=rev
-            )
-            fi  = compute_if_from_res(
-                res,
-                temp_c=temp, humidity_pct=hum,
-                precip_it=precip, surface_it=surface,
-                wind_kmh=wind, expo_it=expo,
-                technique_level=tech, extra_load_kg=loadkg
-            )
+            res = compute_from_arrays(lat,lon,ele, base, up, down, DEFAULTS["weight"], rev)
+            fi  = compute_if_from_res(res, temp, hum, precip, surface, wind, expo, tech, loadkg)
     except Exception as e:
         have_data = False
         st.warning(f"Impossibile calcolare: {e}. Mostro solo il layout.")
 
+# Placeholder coerenti
 if not have_data:
-    # Placeholder: valori a zero e profilo piatto 0..10 km
     res = {
-        "tot_km": 0.0, "dplus": 0.0, "dneg": 0.0,
+        "tot_km": 10.0, "dplus": 0, "dneg": 0,
         "t_dist": 0.0, "t_up": 0.0, "t_down": 0.0, "t_total": 0.0,
         "holes": 0,
-        "len_flat_km": 0.0, "len_up_km": 0.0, "len_down_km": 0.0,
+        "len_flat_km": 10.0, "len_up_km": 0.0, "len_down_km": 0.0,
         "grade_up_pct": 0.0, "grade_down_pct": 0.0,
         "cal_total": 0,
         "asc_bins_m": [0,0,0,0,0], "desc_bins_m": [0,0,0,0,0],
         "lcs25_m": 0, "blocks25_count": 0, "surge_idx_per_km": 0.0,
         "avg_alt_m": None,
-        "profile_x_km": list(np.linspace(0, 10, 41)),
-        "profile_y_m": [0.0]*41,
+        "profile_x_km": list(range(0, 11)),
+        "profile_y_m": [0]*11,
+        "loop_fix_applied": False, "loop_drift_abs_m": 0.0,
+        "loop_balance_applied": False, "loop_like": False, "balance_diff_m": 0.0,
     }
-    fi = {"IF": 0.0, "cat": "—"}
+    fi = {"IF": 0.0, "cat": cat_from_if(0.0)}
 
-# === Testate: Distanza, D+ e Tempo totale ===
+# === Testate: Distanza, D+ e Tempo totale (trattini se placeholder) ===
 c1,c2,c3 = st.columns(3)
-c1.metric("Distanza (km)", f"{res['tot_km']:.2f}")
-c2.metric("Dislivello + (m)", f"{int(res['dplus'])}")
-c3.metric("Tempo totale", f"{int(res['t_total']//60)}:{int(round(res['t_total']%60)):02d}")
+c1.metric("Distanza (km)", "-" if not have_data else f"{res['tot_km']:.2f}")
+c2.metric("Dislivello + (m)", "-" if not have_data else f"{int(res['dplus'])}")
+if have_data:
+    c3.metric("Tempo totale", f"{int(res['t_total']//60)}:{int(round(res['t_total']%60)):02d}")
+else:
+    c3.metric("Tempo totale", "-")
 
 # === INDICE DI DIFFICOLTÀ (titolo/numero a sinistra, gauge a destra) ===
 gc1, gc2 = st.columns([1, 2])
-
 with gc1:
     st.subheader("Indice di Difficoltà")
     st.markdown(
@@ -493,7 +489,6 @@ with gc1:
         """,
         unsafe_allow_html=True
     )
-
 with gc2:
     st.markdown(
         f"""
@@ -507,152 +502,114 @@ with gc2:
 # === Risultati dettagliati ===
 st.subheader("Risultati")
 cols = st.columns(2)
+def dash_if(x): return "-" if not have_data else x
 with cols[0]:
-    st.write(f"- **Dislivello − (m):** {int(res['dneg'])}")
-    st.write(f"- **Tempo piano:** {int(res['t_dist']//60)}:{int(round(res['t_dist']%60)):02d}")
-    st.write(f"- **Tempo salita:** {int(res['t_up']//60)}:{int(round(res['t_up']%60)):02d}")
-    st.write(f"- **Tempo discesa:** {int(res['t_down']//60)}:{int(round(res['t_down']%60)):02d}")
-    st.write(f"- **Calorie stimate:** {res['cal_total']}")
-    st.write(f"- **Piano (km):** {res['len_flat_km']:.2f} — **Salita (km):** {res['len_up_km']:.2f} — **Discesa (km):** {res['len_down_km']:.2f}")
-    st.write(f"- **Pend. media salita (%):** {res['grade_up_pct']:.1f} — **discesa (%):** {res['grade_down_pct']:.1f}")
+    st.write(f"- **Dislivello − (m):** {dash_if(str(int(res['dneg'])))}")
+    st.write(f"- **Tempo piano:** {dash_if(f'{int(res['t_dist']//60)}:{int(round(res['t_dist']%60)):02d}' if have_data else '-')}")
+    st.write(f"- **Tempo salita:** {dash_if(f'{int(res['t_up']//60)}:{int(round(res['t_up']%60)):02d}' if have_data else '-')}")
+    st.write(f"- **Tempo discesa:** {dash_if(f'{int(res['t_down']//60)}:{int(round(res['t_down']%60)):02d}' if have_data else '-')}")
+    st.write(f"- **Calorie stimate:** {dash_if(str(res['cal_total']))}")
+    st.write(f"- **Piano (km):** {dash_if(f'{res['len_flat_km']:.2f}' if have_data else '-')}"
+             f" — **Salita (km):** {dash_if(f'{res['len_up_km']:.2f}' if have_data else '-')}"
+             f" — **Discesa (km):** {dash_if(f'{res['len_down_km']:.2f}' if have_data else '-')}")
+    st.write(f"- **Pend. media salita (%):** {dash_if(f'{res['grade_up_pct']:.1f}' if have_data else '-')}"
+             f" — **discesa (%):** {dash_if(f'{res['grade_down_pct']:.1f}' if have_data else '-')}")
 with cols[1]:
-    st.write(f"- **LCS ≥25% (m):** {int(res['lcs25_m'])}")
-    st.write(f"- **Blocchi ripidi (≥100 m @ ≥25%):** {int(res['blocks25_count'])}")
-    st.write(f"- **Surge (cambi ritmo)/km:** {res['surge_idx_per_km']:.2f}")
-    if have_data:
-        holes = int(res["holes"])
-        st.write(f"- **Buchi GPX:** {'OK (0)' if holes==0 else f'ATTENZIONE ({holes})'}")
-    else:
-        st.write(f"- **Buchi GPX:** —")
+    st.write(f"- **LCS ≥25% (m):** {dash_if(str(int(res['lcs25_m'])))}")
+    st.write(f"- **Blocchi ripidi (≥100 m @ ≥25%):** {dash_if(str(int(res['blocks25_count'])))}")
+    st.write(f"- **Surge (cambi ritmo)/km:** {dash_if(f'{res['surge_idx_per_km']:.2f}' if have_data else '-')}")
+    holes = int(res["holes"])
+    st.write(f"- **Buchi GPX:** {dash_if('OK (0)' if holes==0 else f'ATTENZIONE ({holes})')}")
 
-# === Profilo altimetrico con etichette Km/Tempo ===
-# === Profilo altimetrico con etichette Km/Tempo ===
+# === Profilo altimetrico (con compressione asse X) ===
 st.subheader("Profilo altimetrico")
 
-# Regolo la larghezza del riquadro tramite colonne a rapporto variabile
-gcol, spacer = st.columns([graph_width_ratio, max(1, 6-graph_width_ratio)])
-with gcol:
-    x_raw = res["profile_x_km"]; y = res["profile_y_m"]
-    df = pd.DataFrame({"km_raw": x_raw, "ele": y})
+# km ed ele (o placeholder)
+km_raw = res["profile_x_km"]
+ele    = res["profile_y_m"]
+km_plot = [k/comp for k in km_raw]
+df = pd.DataFrame({"km_raw": km_raw, "km_plot": km_plot, "ele": ele})
 
-    # ---- Calcolo compressione orizzontale ----
-    if have_data and len(y) > 0:
-        ymin, ymax = float(np.min(y)), float(np.max(y))
-        rng_y_km = max(0.001, (ymax - ymin) / 1000.0)   # m -> km
-        rng_x_km = max(0.001, (x_raw[-1] - x_raw[0]) if len(x_raw) > 1 else res["tot_km"])
-        if auto_proportion:
-            # “auto”: 1 km (X) ≈ 1000 m (Y) -> pendenze ~reali a 45° (in senso qualitativo)
-            comp = rng_x_km / rng_y_km
-            comp = float(np.clip(comp, 0.5, 5.0))
-        else:
-            comp = float(x_compress)
-    else:
-        comp = float(x_compress)
+# Ticks a km interi sui valori "plot" corrispondenti
+if have_data:
+    km_ticks_real = list(range(0, int(math.ceil(res["tot_km"])) + 1))
+else:
+    km_ticks_real = list(range(0, 11))
+km_ticks_plot = [k/comp for k in km_ticks_real]
 
-    # km "di plot" (compressi): l’asse mostrerà comunque i km reali via labelExpr
-    df["km_plot"] = df["km_raw"] / comp
+# Alias usato più in basso dalla tabella split
+km_ticks = km_ticks_real
 
-    # tick a km interi sui valori "plot" corrispondenti
-    if have_data:
-        km_ticks_real = list(range(0, int(math.ceil(res["tot_km"])) + 1))
-    else:
-        km_ticks_real = list(range(0, 11))
-    km_ticks_plot = [k/comp for k in km_ticks_real]
-    km_ticks = km_ticks_real
+# Etichette Km/Orario (solo con dati reali e se richiesto)
+step_km = RS_STEP_M/1000.0
+dt_steps=[0.0]
+for i in range(1,len(ele)):
+    dz = ele[i]-ele[i-1]
+    t_flat = base * step_km
+    t_up   = up   * max(0.0, dz)/100.0
+    t_down = down * max(0.0,-dz)/200.0
+    dt_steps.append(t_flat+t_up+t_down)
+cum = np.cumsum(dt_steps)
 
-    # etichette sui km
+if have_data and show_labels:
     ann = []
-    step_km = RS_STEP_M/1000.0
-    dt_steps=[0.0]
-    for i in range(1,len(y)):
-        dz = y[i]-y[i-1]
-        t_flat = base * step_km
-        t_up   = up   * max(0.0, dz)/100.0
-        t_down = down * max(0.0,-dz)/200.0
-        dt_steps.append(t_flat+t_up+t_down)
-    cum = np.cumsum(dt_steps)
+    for k in km_ticks_real:
+        # posizione sull'asse "plot"
+        idx = int(np.argmin(np.abs(df["km_raw"].values - k)))
+        yk  = float(df.loc[idx,"ele"])
+        t   = float(cum[idx])
+        if show_daytime:
+            base_dt = dt.datetime.combine(dt.date.today(), start_time)
+            txt = (base_dt + dt.timedelta(minutes=t)).strftime("%H:%M")
+        else:
+            hh = int(t//60); mm = int(round(t - hh*60))
+            if mm==60: hh+=1; mm=0
+            txt = f"{hh}:{mm:02d}"
+        ann.append({"km_plot": float(k/comp), "ele": yk, "top": f"{k} km", "bot": txt})
+    ann_df = pd.DataFrame(ann)
+else:
+    ann_df = pd.DataFrame(columns=["km_plot","ele","top","bot"])
 
-    if have_data:
-        for k in km_ticks_real:
-            idx = int(np.argmin(np.abs(df["km_raw"].values - k)))
-            yk = float(df.loc[idx,"ele"])
-            t  = float(cum[idx])
-            if show_daytime:
-                base_dt = dt.datetime.combine(dt.date.today(), start_time)
-                txt = (base_dt + dt.timedelta(minutes=t)).strftime("%H:%M")
-            else:
-                hh = int(t//60); mm = int(round(t - hh*60))
-                if mm==60: hh+=1; mm=0
-                txt = f"{hh}:{mm:02d}"
-            ann.append({"km_plot": float(k)/comp, "ele": yk, "top": f"{k} km", "bot": txt})
-    ann_df = pd.DataFrame(ann) if ann else pd.DataFrame(columns=["km_plot","ele","top","bot"])
+line = alt.Chart(df).mark_line().encode(
+    x=alt.X("km_plot:Q", axis=alt.Axis(title="Distanza (km)", values=km_ticks_plot,
+                                       labelFlush=True, labelOverlap=True)),
+    y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)")),
+).properties(height=chart_h)
 
- 
-        # grafico
-    line = alt.Chart(df).mark_line().encode(
-        x=alt.X(
-            "km_plot:Q",
-            axis=alt.Axis(
-                title="Distanza (km)",
-                values=km_ticks_plot,
-                # << FIX: usare datum.value per calcolare l'etichetta reale (km)
-                labelExpr=f'datum.value==null ? "" : format(datum.value*{comp:.6g}, ".0f")'
-            )
-        ),
-        y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)")),
-    ).properties(
-        height=360,
-        padding={"left": 5, "right": 5, "top": 5, "bottom": 34}  # << FIX: più spazio in basso
-    )
-
-    if have_data and show_labels and not ann_df.empty:  # << usa il nome corretto del flag
-        text1 = alt.Chart(ann_df).mark_text(fontSize=12, dy=-14, fontWeight="bold").encode(
-            x="km_plot:Q", y="ele:Q", text="top:N"
-        )
-        text2 = alt.Chart(ann_df).mark_text(fontSize=12, dy=12).encode(
-            x="km_plot:Q", y="ele:Q", text="bot:N"
-        )
-        st.altair_chart(alt.layer(line, text1, text2).resolve_scale(y='shared'), use_container_width=True)
-    else:
-        st.altair_chart(line, use_container_width=True)
-
+if have_data and show_labels and not ann_df.empty:
+    text1 = alt.Chart(ann_df).mark_text(fontSize=12, dy=-14, fontWeight="bold").encode(x="km_plot:Q", y="ele:Q", text="top:N")
+    text2 = alt.Chart(ann_df).mark_text(fontSize=12, dy=12).encode(x="km_plot:Q", y="ele:Q", text="bot:N")
+    st.altair_chart(alt.layer(line, text1, text2).resolve_scale(y='shared'), use_container_width=True)
+else:
+    st.altair_chart(line, use_container_width=True)
 
 # === Tempi / Orario ai diversi Km (tabella) ===
 st.subheader("Tempi / Orario ai diversi Km")
-if have_data:
 
 rows = []
+if have_data:
+    km_col = "km_raw" if "km_raw" in df.columns else "km"
+    for k in km_ticks[1:]:
+        idx_k   = int(np.argmin(np.abs(df[km_col].values - k)))
+        idx_km1 = int(np.argmin(np.abs(df[km_col].values - (k - 1))))
+        t_cum   = float(cum[idx_k])
+        t_prev  = float(cum[idx_km1])
+        t_split = t_cum - t_prev
 
-# Se hai già creato il DataFrame con due colonne ‘km_raw’ e ‘km_plot’, usiamo km_raw
-# altrimenti cadiamo sulla colonna ‘km’ (compatibilità con la versione precedente).
-km_col = "km_raw" if "km_raw" in df.columns else "km"
+        hh_s=int(t_split//60); mm_s=int(round(t_split-hh_s*60))
+        if mm_s==60: hh_s+=1; mm_s=0
+        split_txt=f"{hh_s}:{mm_s:02d}"
 
-for k in km_ticks[1:]:
-    idx_k   = int(np.argmin(np.abs(df[km_col].values - k)))
-    idx_km1 = int(np.argmin(np.abs(df[km_col].values - (k - 1))))
+        if show_daytime:
+            base_dt = dt.datetime.combine(dt.date.today(), start_time)
+            cum_txt = (base_dt + dt.timedelta(minutes=t_cum)).strftime("%H:%M")
+        else:
+            hh_c=int(t_cum//60); mm_c=int(round(t_cum-hh_c*60))
+            if mm_c==60: hh_c+=1; mm_c=0
+            cum_txt=f"{hh_c}:{mm_c:02d}"
 
-    t_cum   = float(cum[idx_k])      # minuti cumulati al Km k
-    t_prev  = float(cum[idx_km1])    # minuti cumulati al Km k-1
-    t_split = t_cum - t_prev         # parziale tra k-1 e k
+        rows.append({"Km": k, "Tempo parziale": split_txt, "Cumulativo": cum_txt})
 
-    # formato “hh:mm” per lo split
-    hh_s = int(t_split // 60); mm_s = int(round(t_split - hh_s*60))
-    if mm_s == 60: hh_s += 1; mm_s = 0
-    split_txt = f"{hh_s}:{mm_s:02d}"
-
-    # cumulato: ora del giorno oppure tempo cumulato
-    if show_daytime:
-        base_dt = dt.datetime.combine(dt.date.today(), start_time)
-        cum_txt = (base_dt + dt.timedelta(minutes=t_cum)).strftime("%H:%M")
-    else:
-        hh_c = int(t_cum // 60); mm_c = int(round(t_cum - hh_c*60))
-        if mm_c == 60: hh_c += 1; mm_c = 0
-        cum_txt = f"{hh_c}:{mm_c:02d}"
-
-    rows.append({"Km": k, "Tempo parziale": split_txt, "Cumulativo": cum_txt})
-
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=360)
-else:
-    # Tabella “vuota” con km 1..10 e celle senza valore
-    rows = [{"Km": k, "Tempo parziale": "—", "Cumulativo": "—"} for k in range(1,11)]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=360)
+# tabella sempre mostrata (vuota se placeholder)
+st.dataframe(pd.DataFrame(rows, columns=["Km","Tempo parziale","Cumulativo"]),
+             use_container_width=True, height=360)
