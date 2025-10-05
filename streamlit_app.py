@@ -313,8 +313,8 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
 # ================== Gauge SVG robusto ==================
 def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_labels: bool = True) -> str:
     """
-    Semigauge 0..100 con settori nel verso corretto (verde→giallo→arancio→rosso→viola→nero),
-    ago e, se richiesto, le etichette sui colori.
+    Semigauge 0..100 con settori (verde→giallo→arancio→rosso→viola→nero),
+    ago DAL CENTRO e, se richiesto, etichette sui colori.
     """
     v = max(0.0, min(100.0, float(value)))
 
@@ -333,7 +333,7 @@ def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_label
     ]
 
     def val2ang(pct: float) -> float:
-        # 0% -> 180°, 100% -> 0°
+        # 0% -> 180°, 100% -> 0° (semicerchio alto)
         return 180.0 - (pct / 100.0) * 180.0
 
     def polar(r: float, deg: float):
@@ -355,7 +355,7 @@ def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_label
         )
         return f'<path d="{d}" fill="{color}" stroke="{color}" stroke-width="1"/>'
 
-    # base bianca
+    # base bianca sotto ai settori (per sicurezza)
     base_path = (
         f'M {polar(R_outer,180)[0]:.1f},{polar(R_outer,180)[1]:.1f} '
         f'A {R_outer:.1f},{R_outer:.1f} 0 0 1 {polar(R_outer,0)[0]:.1f},{polar(R_outer,0)[1]:.1f} '
@@ -371,16 +371,15 @@ def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_label
             a0, a1 = a1, a0
         segs.append(ring_segment(a0, a1, col))
 
-    # ago
+    # ---- AGO: dal centro al bordo ----
     ang = val2ang(v)
-    x_tip, y_tip = polar((R_outer + R_inner) / 2.0, ang)
-    x_end, y_end = polar(R_inner - 6.0, ang)
+    x_tip, y_tip = polar(R_outer - 8.0, ang)   # punta
     needle = (
-        f'<line x1="{x_end:.1f}" y1="{y_end:.1f}" x2="{x_tip:.1f}" y2="{y_tip:.1f}" stroke="#333" stroke-width="4" />'
-        f'<circle cx="{x_end:.1f}" cy="{y_end:.1f}" r="6" fill="#333"/>'
+        f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x_tip:.1f}" y2="{y_tip:.1f}" stroke="#333" stroke-width="5" />'
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="7" fill="#333"/>'
     )
 
-    # valore numerico
+    # valore vicino alla punta
     txt_val = (
         f'<text x="{x_tip:.1f}" y="{y_tip-10:.1f}" text-anchor="middle" '
         f'font-family="Segoe UI, Roboto, Arial" font-size="20" font-weight="600" fill="#000">{v:.1f}</text>'
@@ -404,7 +403,6 @@ def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_label
         f'xmlns="http://www.w3.org/2000/svg">{base}{"".join(segs)}{needle}{txt_val}{labels_svg}</svg>'
     )
     return svg
-
 
 # ================== UI ==================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
