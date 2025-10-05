@@ -409,7 +409,18 @@ tech   = st.sidebar.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(
 loadkg = st.sidebar.number_input("Zaino extra (kg)", 0.0, 40.0, DEFAULTS["loadkg"], 1.0)
 
 st.sidebar.subheader("Aspetto profilo")
-graph_width_ratio = st.sidebar.slider("Larghezza grafico", 2, 5, 4, help="Allarga o restringi il riquadro del profilo per rendere più 'ripide' o 'dolci' le pendenze (impatta l'asse X).")
+graph_width_ratio = st.sidebar.slider(
+    "Larghezza grafico", 2, 5, 4,
+    help="Allarga o restringi il riquadro del profilo (implica l'asse X)."
+)
+x_compress = st.sidebar.slider(
+    "Compressione orizzontale (X)", 0.5, 5.0, 1.0, 0.1,
+    help="Valori >1 comprimono la distanza sull'asse X (pendenze più 'ripide' visivamente)."
+)
+auto_proportion = st.sidebar.checkbox(
+    "Proporziona distanza a elevazione (auto)", value=False,
+    help="Calcola automaticamente una compressione X basata sul rapporto distanza/dislivello (≈ 45° per ~100% di pendenza, ignorando i pixel del contenitore)."
+)
 
 # --- Uploader + calcolo con modalità placeholder ---
 uploaded   = st.file_uploader("Trascina qui il file GPX", type=["gpx"])
@@ -515,16 +526,40 @@ with cols[1]:
         st.write(f"- **Buchi GPX:** —")
 
 # === Profilo altimetrico con etichette Km/Tempo ===
+# === Profilo altimetrico con etichette Km/Tempo ===
 st.subheader("Profilo altimetrico")
 
 # Regolo la larghezza del riquadro tramite colonne a rapporto variabile
 gcol, spacer = st.columns([graph_width_ratio, max(1, 6-graph_width_ratio)])
 with gcol:
-    x = res["profile_x_km"]; y = res["profile_y_m"]
-    df = pd.DataFrame({"km": x, "ele": y})
+    x_raw = res["profile_x_km"]; y = res["profile_y_m"]
+    df = pd.DataFrame({"km_raw": x_raw, "ele": y})
 
-    # etichette
-    km_ticks = list(range(0, int(math.ceil(res["tot_km"]))+1)) if have_data else list(range(0, 11))
+    # ---- Calcolo compressione orizzontale ----
+    if have_data and len(y) > 0:
+        ymin, ymax = float(np.min(y)), float(np.max(y))
+        rng_y_km = max(0.001, (ymax - ymin) / 1000.0)   # m -> km
+        rng_x_km = max(0.001, (x_raw[-1] - x_raw[0]) if len(x_raw) > 1 else res["tot_km"])
+        if auto_proportion:
+            # “auto”: 1 km (X) ≈ 1000 m (Y) -> pendenze ~reali a 45° (in senso qualitativo)
+            comp = rng_x_km / rng_y_km
+            comp = float(np.clip(comp, 0.5, 5.0))
+        else:
+            comp = float(x_compress)
+    else:
+        comp = float(x_compress)
+
+    # km "di plot" (compressi): l’asse mostrerà comunque i km reali via labelExpr
+    df["km_plot"] = df["km_raw"] / comp
+
+    # tick a km interi sui valori "plot" corrispondenti
+    if have_data:
+        km_ticks_real = list(range(0, int(math.ceil(res["tot_km"])) + 1))
+    else:
+        km_ticks_real = list(range(0, 11))
+    km_ticks_plot = [k/comp for k in km_ticks_real]
+
+    # etichette sui km
     ann = []
     step_km = RS_STEP_M/1000.0
     dt_steps=[0.0]
@@ -537,8 +572,8 @@ with gcol:
     cum = np.cumsum(dt_steps)
 
     if have_data:
-        for k in km_ticks:
-            idx = int(np.argmin(np.abs(df["km"].values - k)))
+        for k in km_ticks_real:
+            idx = int(np.argmin(np.abs(df["km_raw"].values - k)))
             yk = float(df.loc[idx,"ele"])
             t  = float(cum[idx])
             if show_daytime:
@@ -548,20 +583,33 @@ with gcol:
                 hh = int(t//60); mm = int(round(t - hh*60))
                 if mm==60: hh+=1; mm=0
                 txt = f"{hh}:{mm:02d}"
-            ann.append({"km": float(k), "ele": yk, "top": f"{k} km", "bot": txt})
-    ann_df = pd.DataFrame(ann) if ann else pd.DataFrame(columns=["km","ele","top","bot"])
+            ann.append({"km_plot": float(k)/comp, "ele": yk, "top": f"{k} km", "bot": txt})
+    ann_df = pd.DataFrame(ann) if ann else pd.DataFrame(columns=["km_plot","ele","top","bot"])
 
+    # grafico
     line = alt.Chart(df).mark_line().encode(
-        x=alt.X("km:Q", axis=alt.Axis(title="Distanza (km)", values=km_ticks)),
+        x=alt.X(
+            "km_plot:Q",
+            axis=alt.Axis(
+                title="Distanza (km)",
+                values=km_ticks_plot,
+                labelExpr=f'format(datum*{comp:.6g}, ".0f")'  # mostra i km reali sull’asse
+            )
+        ),
         y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)")),
     ).properties(height=360)
 
     if have_data and show_labels_graph and not ann_df.empty:
-        text1 = alt.Chart(ann_df).mark_text(fontSize=12, dy=-14, fontWeight="bold").encode(x="km:Q", y="ele:Q", text="top:N")
-        text2 = alt.Chart(ann_df).mark_text(fontSize=12, dy=12).encode(x="km:Q", y="ele:Q", text="bot:N")
+        text1 = alt.Chart(ann_df).mark_text(fontSize=12, dy=-14, fontWeight="bold").encode(
+            x="km_plot:Q", y="ele:Q", text="top:N"
+        )
+        text2 = alt.Chart(ann_df).mark_text(fontSize=12, dy=12).encode(
+            x="km_plot:Q", y="ele:Q", text="bot:N"
+        )
         st.altair_chart(alt.layer(line, text1, text2).resolve_scale(y='shared'), use_container_width=True)
     else:
         st.altair_chart(line, use_container_width=True)
+
 
 # === Tempi / Orario ai diversi Km (tabella) ===
 st.subheader("Tempi / Orario ai diversi Km")
