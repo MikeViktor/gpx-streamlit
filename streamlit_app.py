@@ -9,7 +9,7 @@ import streamlit as st
 
 # ================== Costanti e default (come gpx_gui.py) ==================
 APP_TITLE = "Tempo percorrenza sentiero — web"
-APP_VER   = "v5.1 (larghezza grafico + esagerazione verticale)"
+APP_VER   = "v5.2 (quote corrette + bottoni +/- grafico)"
 
 # Ricampionamento / filtri
 RS_STEP_M     = 3.0
@@ -408,12 +408,33 @@ show_daytime = st.sidebar.checkbox("Mostra orario del giorno", value=True)
 show_labels  = st.sidebar.checkbox("Mostra etichette sul grafico", value=True)
 start_time   = st.sidebar.time_input("Orario di partenza", value=dt.time(8,0))
 
-# Profilo altimetrico: dimensioni + esagerazione
+# Profilo altimetrico: bottoni +/- per dimensioni (niente numeri)
 st.sidebar.subheader("Profilo altimetrico")
-plot_w = st.sidebar.slider("Larghezza grafico (px)", 480, 1600, 1000, 20)
-plot_h = st.sidebar.slider("Altezza grafico (px)",   240,  700,  360, 10)
-y_exag = st.sidebar.slider("Esagerazione verticale (×)", 0.5, 4.0, 1.0, 0.1,
-                           help="Moltiplica le quote solo per la resa grafica.")
+if "plot_w" not in st.session_state: st.session_state.plot_w = 1000
+if "plot_h" not in st.session_state: st.session_state.plot_h = 360
+
+wcol1, wcol2, wcol3 = st.sidebar.columns([1,1,5])
+with wcol1:
+    if st.button("−", key="w_minus"):
+        st.session_state.plot_w = max(480, st.session_state.plot_w - 60)
+with wcol2:
+    if st.button("+", key="w_plus"):
+        st.session_state.plot_w = min(1600, st.session_state.plot_w + 60)
+with wcol3:
+    st.caption("Larghezza grafico")
+
+hcol1, hcol2, hcol3 = st.sidebar.columns([1,1,5])
+with hcol1:
+    if st.button("−", key="h_minus"):
+        st.session_state.plot_h = max(240, st.session_state.plot_h - 20)
+with hcol2:
+    if st.button("+", key="h_plus"):
+        st.session_state.plot_h = min(700, st.session_state.plot_h + 20)
+with hcol3:
+    st.caption("Altezza grafico")
+
+plot_w = st.session_state.plot_w
+plot_h = st.session_state.plot_h
 
 st.sidebar.subheader("Parametri di passo (min)")
 base = st.sidebar.number_input("Min/km (piano)",  5.0, 60.0, DEFAULTS["base"], 0.5)
@@ -543,39 +564,39 @@ else:
         st.write("- **Surge (cambi ritmo)/km:** -")
         st.write("- **Buchi GPX:** -")
 
-# === Profilo altimetrico ===
+# === Profilo altimetrico (asse Y dalla quota minima) ===
 st.subheader("Profilo altimetrico")
 
 if have_data and res:
     x = res["profile_x_km"]
-    y = [v * y_exag for v in res["profile_y_m"]]  # esagerazione verticale SOLO grafica
-else:
-    x = [i for i in range(11)]
-    y = [0 for _ in x]
+    y = res["profile_y_m"][:]  # nessuna esagerazione
+    df = pd.DataFrame({"km": x, "ele": y})
 
-df = pd.DataFrame({"km": x, "ele": y})
-
-# ticks a km interi
-if have_data and res:
+    # ticks a km interi
     km_ticks = list(range(0, int(math.ceil(res["tot_km"])) + 1))
-else:
-    km_ticks = list(range(0, 11))
 
-line = alt.Chart(df).mark_line().encode(
-    x=alt.X("km:Q",
-            axis=alt.Axis(title="Distanza (km)", values=km_ticks, labelPadding=6)),
-    y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)"))
-).properties(width=plot_w, height=plot_h)
+    # dominio Y: dalla quota minima, con un piccolo margine
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+    pad   = max(30.0, (y_max - y_min) * 0.08)
+    y_dom = [y_min - pad, y_max + pad]
 
-chart = line
+    base_line = alt.Chart(df).mark_line().encode(
+        x=alt.X("km:Q",
+                axis=alt.Axis(title="Distanza (km)", values=km_ticks, labelPadding=6)),
+        y=alt.Y("ele:Q",
+                axis=alt.Axis(title="Quota (m)"),
+                scale=alt.Scale(domain=y_dom))
+    ).properties(width=plot_w, height=st.session_state.plot_h)
 
-# etichette km/tempo se disponibili
-if have_data and res:
-    # tempi cumulati per etichette
+    chart = base_line
+
+    # etichette km/tempo
     step_km = RS_STEP_M/1000.0
     dt_steps=[0.0]
-    for i in range(1,len(res["profile_y_m"])):
-        dz = res["profile_y_m"][i]-res["profile_y_m"][i-1]
+    y_raw = res["profile_y_m"]
+    for i in range(1,len(y_raw)):
+        dz = y_raw[i]-y_raw[i-1]
         t_flat = base * step_km
         t_up   = up   * max(0.0, dz)/100.0
         t_down = down * max(0.0,-dz)/200.0
@@ -585,7 +606,7 @@ if have_data and res:
     ann=[]
     for k in km_ticks:
         idx = int(np.argmin(np.abs(np.array(x) - k)))
-        yk  = float(df.loc[idx, "ele"])  # già con y_exag
+        yk  = float(df.loc[idx, "ele"])
         t   = float(cum[idx])
         if show_daytime:
             base_dt = dt.datetime.combine(dt.date.today(), start_time)
@@ -602,15 +623,28 @@ if have_data and res:
             x="km:Q", y="ele:Q", text="top:N")
         text2 = alt.Chart(ann_df).mark_text(fontSize=12, dy=12).encode(
             x="km:Q", y="ele:Q", text="bot:N")
-        chart = alt.layer(line, text1, text2).resolve_scale(y='shared').properties(width=plot_w, height=plot_h)
+        chart = alt.layer(base_line, text1, text2).resolve_scale(y='shared').properties(width=plot_w, height=st.session_state.plot_h)
 
-st.altair_chart(chart, use_container_width=False)
+    st.altair_chart(chart, use_container_width=False)
+
+else:
+    # placeholder: griglia vuota
+    x = [i for i in range(11)]
+    y = [0 for _ in x]
+    df = pd.DataFrame({"km": x, "ele": y})
+    km_ticks = list(range(0, 11))
+    # dominio fisso per avere una griglia “neutra”
+    placeholder = alt.Chart(df).mark_line().encode(
+        x=alt.X("km:Q", axis=alt.Axis(title="Distanza (km)", values=km_ticks, labelPadding=6)),
+        y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)"),
+                scale=alt.Scale(domain=[0,100]))
+    ).properties(width=plot_w, height=plot_h)
+    st.altair_chart(placeholder, use_container_width=False)
 
 # === Tabella split per km ===
 st.subheader("Tempi / Orario ai diversi Km")
 
 if have_data and res:
-    # ricalcolo cum sui dati NON esagerati
     step_km = RS_STEP_M/1000.0
     dt_steps=[0.0]
     y_raw = res["profile_y_m"]
@@ -623,10 +657,9 @@ if have_data and res:
     cum = np.cumsum(dt_steps)
 
     rows=[]
-    for i in range(1, len(km_ticks)):
-        k = km_ticks[i]
-        idx_k   = int(np.argmin(np.abs(np.array(x) - k)))
-        idx_km1 = int(np.argmin(np.abs(np.array(x) - (k-1))))
+    for k in range(1, int(math.ceil(res["tot_km"])) + 1):
+        idx_k   = int(np.argmin(np.abs(np.array(res["profile_x_km"]) - k)))
+        idx_km1 = int(np.argmin(np.abs(np.array(res["profile_x_km"]) - (k-1))))
         t_cum = float(cum[idx_k]); t_prev = float(cum[idx_km1]); t_split = t_cum - t_prev
         hh_s=int(t_split//60); mm_s=int(round(t_split-hh_s*60))
         if mm_s==60: hh_s+=1; mm_s=0
