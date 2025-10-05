@@ -433,9 +433,40 @@ tech   = st.sidebar.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(
 loadkg = st.sidebar.number_input("Zaino extra (kg)", 0.0, 40.0, DEFAULTS["loadkg"], 1.0)
 
 uploaded = st.file_uploader("Trascina qui il file GPX", type=["gpx"])
-if not uploaded:
-    st.info("Carica un GPX per iniziare.")
-    st.stop()
+have_data = uploaded is not None
+
+if have_data:
+    try:
+        data = uploaded.read()
+        lat,lon,ele = parse_gpx_bytes(data)
+        if len(ele) < 2:
+            st.error("Il GPX non contiene quote utili.")
+            have_data = False
+        else:
+            res = compute_from_arrays(lat,lon,ele, base, up, down, DEFAULTS["weight"], rev)
+            fi  = compute_if_from_res(res, temp, hum, precip, surface, wind, expo, tech, loadkg)
+    except Exception as e:
+        st.error(f"Errore calcolo: {e}")
+        have_data = False
+
+if not have_data:
+    # segnaposto coerenti (campi presenti ma senza numeri)
+    res = {
+        "tot_km": 0.0, "dplus": 0.0, "dneg": 0.0,
+        "t_dist": 0.0, "t_up": 0.0, "t_down": 0.0, "t_total": 0.0,
+        "len_flat_km": 0.0, "len_up_km": 0.0, "len_down_km": 0.0,
+        "grade_up_pct": 0.0, "grade_down_pct": 0.0,
+        "lcs25_m": 0.0, "blocks25_count": 0, "surge_idx_per_km": 0.0,
+        "holes": 0,
+        "profile_x_km": [0.0, 1.0], "profile_y_m": [0.0, 0.0],
+    }
+    fi = {"IF": 0.0, "cat": "-"}
+
+# === Testate: Distanza, D+ e Tempo totale ===
+c1,c2,c3 = st.columns(3)
+c1.metric("Distanza (km)", "-" if not have_data else f"{res['tot_km']:.2f}")
+c2.metric("Dislivello + (m)", "-" if not have_data else f"{int(res['dplus'])}")
+c3.metric("Tempo totale", "-" if not have_data else f"{int(res['t_total']//60)}:{int(round(res['t_total']%60)):02d}")
 
 # === Parse + calcolo identico al desktop ===
 try:
