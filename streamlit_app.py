@@ -311,24 +311,25 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
     return {"IF": IF, "cat": cat_from_if(IF)}
 
 # ================== Gauge SVG robusto ==================
-def gauge_svg_html(value: float, width: int = 560, height: int = 200) -> str:
+def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_labels: bool = True) -> str:
     """
-    Semigauge 0..100 con settori nel verso corretto (verde→giallo→arancio→rosso→viola→nero).
+    Semigauge 0..100 con settori nel verso corretto (verde→giallo→arancio→rosso→viola→nero),
+    ago e, se richiesto, le etichette sui colori.
     """
     v = max(0.0, min(100.0, float(value)))
 
-    # centro in basso, semicerchio 180°
     cx, cy = width / 2.0, height - 12.0
     R_outer = min(width * 0.42, height * 0.95)
     R_inner = R_outer - 24.0
 
+    # (start%, end%, color, label)
     bands = [
-        (0, 30,  "#2ecc71"),  # Facile
-        (30, 50, "#f1c40f"),  # Medio
-        (50, 70, "#e67e22"),  # Impegnativo
-        (70, 80, "#e74c3c"),  # Difficile
-        (80, 90, "#8e44ad"),  # Molto difficile
-        (90, 100,"#111111"),  # Estremo
+        (0, 30,  "#2ecc71", "Facile"),
+        (30, 50, "#f1c40f", "Medio"),
+        (50, 70, "#e67e22", "Impeg."),
+        (70, 80, "#e74c3c", "Diffic."),
+        (80, 90, "#8e44ad", "Molto diff."),
+        (90, 100,"#111111", "Estremo"),
     ]
 
     def val2ang(pct: float) -> float:
@@ -340,16 +341,12 @@ def gauge_svg_html(value: float, width: int = 560, height: int = 200) -> str:
         return (cx + r * math.cos(rad), cy - r * math.sin(rad))
 
     def ring_segment(a0: float, a1: float, color: str) -> str:
-        """
-        Disegna un settore di anello tra a0 -> a1 in senso orario.
-        Arco esterno sweep=1 (clockwise), arco interno sweep=0 (counterclockwise).
-        """
         xo0, yo0 = polar(R_outer, a0)
         xo1, yo1 = polar(R_outer, a1)
         xi1, yi1 = polar(R_inner, a1)
         xi0, yi0 = polar(R_inner, a0)
         large = 1 if abs(a0 - a1) > 180 else 0
-
+        # outer: sweep=1 (clockwise), inner: sweep=0 (counterclockwise)
         d = (
             f"M {xo0:.1f},{yo0:.1f} "
             f"A {R_outer:.1f},{R_outer:.1f} 0 {large} 1 {xo1:.1f},{yo1:.1f} "
@@ -358,17 +355,17 @@ def gauge_svg_html(value: float, width: int = 560, height: int = 200) -> str:
         )
         return f'<path d="{d}" fill="{color}" stroke="{color}" stroke-width="1"/>'
 
-    # base bianca (opzionale)
-    base = (
+    # base bianca
+    base_path = (
         f'M {polar(R_outer,180)[0]:.1f},{polar(R_outer,180)[1]:.1f} '
         f'A {R_outer:.1f},{R_outer:.1f} 0 0 1 {polar(R_outer,0)[0]:.1f},{polar(R_outer,0)[1]:.1f} '
         f'L {polar(R_inner,0)[0]:.1f},{polar(R_inner,0)[1]:.1f} '
         f'A {R_inner:.1f},{R_inner:.1f} 0 0 0 {polar(R_inner,180)[0]:.1f},{polar(R_inner,180)[1]:.1f} Z'
     )
-    base = f'<path d="{base}" fill="white" stroke="none"/>'
+    base = f'<path d="{base_path}" fill="white" stroke="none"/>'
 
     segs = []
-    for a, b, col in bands:
+    for a, b, col, _lab in bands:
         a0 = val2ang(a); a1 = val2ang(b)
         if a0 < a1:  # garantiamo a0 > a1
             a0, a1 = a1, a0
@@ -383,17 +380,31 @@ def gauge_svg_html(value: float, width: int = 560, height: int = 200) -> str:
         f'<circle cx="{x_end:.1f}" cy="{y_end:.1f}" r="6" fill="#333"/>'
     )
 
-    # valore
-    txt = (
+    # valore numerico
+    txt_val = (
         f'<text x="{x_tip:.1f}" y="{y_tip-10:.1f}" text-anchor="middle" '
         f'font-family="Segoe UI, Roboto, Arial" font-size="20" font-weight="600" fill="#000">{v:.1f}</text>'
     )
 
+    # etichette sui colori
+    labels_svg = ""
+    if show_labels:
+        r_lab = (R_inner + R_outer) / 2.0 - 8.0
+        for a, b, _col, lab in bands:
+            mid = (a + b) / 2.0
+            ax = val2ang(mid)
+            lx, ly = polar(r_lab, ax)
+            labels_svg += (
+                f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="middle" '
+                f'font-family="Segoe UI, Roboto, Arial" font-size="12" fill="#111">{lab}</text>'
+            )
+
     svg = (
         f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-        f'xmlns="http://www.w3.org/2000/svg">{base}{"".join(segs)}{needle}{txt}</svg>'
+        f'xmlns="http://www.w3.org/2000/svg">{base}{"".join(segs)}{needle}{txt_val}{labels_svg}</svg>'
     )
     return svg
+
 
 # ================== UI ==================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -467,14 +478,16 @@ with gc1:
     )
 
 with gc2:
+    # allineato a sinistra + etichette sui settori
     st.markdown(
         f"""
-        <div style="margin-top:-8px;max-width:640px;margin-left:auto;">
-            {gauge_svg_html(fi['IF'])}
+        <div style="margin-top:-8px; max-width:640px;">
+            {gauge_svg_html(fi['IF'], show_labels=True)}
         </div>
         """,
         unsafe_allow_html=True
     )
+
 # === fine blocco indice di difficoltà ===
 
 
