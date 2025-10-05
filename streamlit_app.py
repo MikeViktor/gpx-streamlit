@@ -9,7 +9,7 @@ import streamlit as st
 
 # ================== Costanti e default (come gpx_gui.py) ==================
 APP_TITLE = "Tempo percorrenza sentiero — web"
-APP_VER   = "v5.2 (quote corrette + bottoni +/- grafico)"
+APP_VER   = "v5 (allineata ai calcoli desktop)"
 
 # Ricampionamento / filtri
 RS_STEP_M     = 3.0
@@ -208,9 +208,7 @@ def compute_from_arrays(lat, lon, ele_raw,
             elif g<30: asc_bins[2]+=seg
             elif g<40: asc_bins[3]+=seg
             else:      asc_bins[4]+=seg
-            if g>=25:
-                current_run+=seg
-                longest_steep_run=max(longest_steep_run,current_run); state=2
+            if g>=25: current_run+=seg; longest_steep_run=max(longest_steep_run,current_run); state=2
             else:
                 if current_run>=100: blocks25+=1
                 current_run=0.0; state=1 if g<15 else 0
@@ -314,19 +312,23 @@ def compute_if_from_res(res, temp_c, humidity_pct, precip_it, surface_it, wind_k
 
 # ================== Gauge SVG robusto ==================
 def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_labels: bool = True) -> str:
-    """Semigauge 0..100 con settori e ago dal centro."""
+    """
+    Semigauge 0..100 con settori pieni (verde→giallo→arancio→rosso→viola→nero)
+    e ago dal centro. Opzionale: etichette sui settori.
+    """
     v = max(0.0, min(100.0, float(value)))
+
     cx, cy = width / 2.0, height - 12.0
     R_outer = min(width * 0.42, height * 0.95)
     R_inner = R_outer - 24.0
 
     bands = [
-        (0, 30,  "#2ecc71", "Facile"),
-        (30, 50, "#f1c40f", "Medio"),
-        (50, 70, "#e67e22", "Impeg."),
-        (70, 80, "#e74c3c", "Diffic."),
-        (80, 90, "#8e44ad", "Molto diff."),
-        (90, 100,"#111111", "Estremo"),
+        (0, 30,  "#2ecc71",  "Facile"),
+        (30, 50, "#f1c40f",  "Medio"),
+        (50, 70, "#e67e22",  "Impeg."),
+        (70, 80, "#e74c3c",  "Diffic."),
+        (80, 90, "#8e44ad",  "Molto diff."),
+        (90,100, "#111111",  "Estremo"),
     ]
 
     def val2ang(pct: float) -> float:
@@ -359,19 +361,19 @@ def gauge_svg_html(value: float, width: int = 620, height: int = 210, show_label
     base = f'<path d="{base_path}" fill="white" stroke="none"/>'
 
     segs = []
-    for a, b, col, _lab in bands:
+    for a, b, col, _ in bands:
         a0 = val2ang(a); a1 = val2ang(b)
         if a0 < a1:
             a0, a1 = a1, a0
         segs.append(ring_segment(a0, a1, col))
 
+    # Ago dal centro al bordo
     ang = val2ang(v)
     x_tip, y_tip = polar(R_outer - 8.0, ang)
     needle = (
         f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x_tip:.1f}" y2="{y_tip:.1f}" stroke="#333" stroke-width="5" />'
         f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="7" fill="#333"/>'
     )
-
     txt_val = (
         f'<text x="{x_tip:.1f}" y="{y_tip-10:.1f}" text-anchor="middle" '
         f'font-family="Segoe UI, Roboto, Arial" font-size="20" font-weight="600" fill="#000">{v:.1f}</text>'
@@ -408,33 +410,32 @@ show_daytime = st.sidebar.checkbox("Mostra orario del giorno", value=True)
 show_labels  = st.sidebar.checkbox("Mostra etichette sul grafico", value=True)
 start_time   = st.sidebar.time_input("Orario di partenza", value=dt.time(8,0))
 
-# Profilo altimetrico: bottoni +/- per dimensioni (niente numeri)
+# --- Profilo altimetrico (bottoni +/- e pulsante ricalcolo) ---
 st.sidebar.subheader("Profilo altimetrico")
 if "plot_w" not in st.session_state: st.session_state.plot_w = 1000
 if "plot_h" not in st.session_state: st.session_state.plot_h = 360
 
-wcol1, wcol2, wcol3 = st.sidebar.columns([1,1,5])
+wcol1, wcol2, wcol3 = st.sidebar.columns([1, 1, 5])
 with wcol1:
-    if st.button("−", key="w_minus"):
+    if st.button("➖", key="w_minus"):
         st.session_state.plot_w = max(480, st.session_state.plot_w - 60)
 with wcol2:
-    if st.button("+", key="w_plus"):
+    if st.button("➕", key="w_plus"):
         st.session_state.plot_w = min(1600, st.session_state.plot_w + 60)
 with wcol3:
     st.caption("Larghezza grafico")
 
-hcol1, hcol2, hcol3 = st.sidebar.columns([1,1,5])
+hcol1, hcol2, hcol3 = st.sidebar.columns([1, 1, 5])
 with hcol1:
-    if st.button("−", key="h_minus"):
+    if st.button("➖", key="h_minus"):
         st.session_state.plot_h = max(240, st.session_state.plot_h - 20)
 with hcol2:
-    if st.button("+", key="h_plus"):
+    if st.button("➕", key="h_plus"):
         st.session_state.plot_h = min(700, st.session_state.plot_h + 20)
 with hcol3:
     st.caption("Altezza grafico")
 
-plot_w = st.session_state.plot_w
-plot_h = st.session_state.plot_h
+st.sidebar.button("🔄 Ricalcola/aggiorna", use_container_width=True, on_click=lambda: st.rerun())
 
 st.sidebar.subheader("Parametri di passo (min)")
 base = st.sidebar.number_input("Min/km (piano)",  5.0, 60.0, DEFAULTS["base"], 0.5)
@@ -483,23 +484,16 @@ if have_data:
         have_data = False
         st.warning(f"Impossibile calcolare: {e}. Mostro solo il layout.")
 
-# === Testate: Distanza, D+ e Tempo totale ===
-c1,c2,c3 = st.columns(3)
+# ================== Testate & Gauge ==================
 if have_data:
+    c1,c2,c3 = st.columns(3)
     c1.metric("Distanza (km)", f"{res['tot_km']:.2f}")
     c2.metric("Dislivello + (m)", f"{int(res['dplus'])}")
     c3.metric("Tempo totale", f"{int(res['t_total']//60)}:{int(round(res['t_total']%60)):02d}")
-else:
-    c1.metric("Distanza (km)", "-")
-    c2.metric("Dislivello + (m)", "-")
-    c3.metric("Tempo totale", "-")
 
-# === INDICE DI DIFFICOLTÀ (titolo/numero a sinistra, gauge a destra) ===
-gc1, gc2 = st.columns([1, 2])
-
-with gc1:
-    st.subheader("Indice di Difficoltà")
-    if have_data and fi:
+    gc1, gc2 = st.columns([1, 2])
+    with gc1:
+        st.subheader("Indice di Difficoltà")
         st.markdown(
             f"""
             <div style="font-size:44px;font-weight:400;line-height:1;margin:2px 0 4px 0;">
@@ -511,30 +505,35 @@ with gc1:
             """,
             unsafe_allow_html=True
         )
-    else:
+    with gc2:
         st.markdown(
-            """
-            <div style="font-size:44px;font-weight:400;line-height:1;margin:2px 0 4px 0;">-</div>
-            <div style="font-size:16px;color:#666;margin-top:-2px;">&nbsp;</div>
-            """,
+            f"""<div style="margin-top:-8px; max-width:640px;">{gauge_svg_html(fi['IF'], show_labels=True)}</div>""",
+            unsafe_allow_html=True
+        )
+else:
+    # Placeholder: valori vuoti e gauge a 0
+    c1,c2,c3 = st.columns(3)
+    c1.metric("Distanza (km)", "—")
+    c2.metric("Dislivello + (m)", "—")
+    c3.metric("Tempo totale", "—")
+    gc1, gc2 = st.columns([1, 2])
+    with gc1:
+        st.subheader("Indice di Difficoltà")
+        st.markdown(
+            """<div style="font-size:44px;font-weight:400;line-height:1;margin:2px 0 4px 0;">—</div>
+               <div style="font-size:16px;color:#666;margin-top:-2px;">—</div>""",
+            unsafe_allow_html=True
+        )
+    with gc2:
+        st.markdown(
+            f"""<div style="margin-top:-8px; max-width:640px;">{gauge_svg_html(0.0, show_labels=True)}</div>""",
             unsafe_allow_html=True
         )
 
-with gc2:
-    gauge_val = fi["IF"] if (have_data and fi) else 0.0
-    st.markdown(
-        f"""
-        <div style="margin-top:-8px; max-width:640px;">
-            {gauge_svg_html(gauge_val, show_labels=True)}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-# === Risultati dettagliati ===
+# ================== Risultati dettagliati ==================
 st.subheader("Risultati")
 cols = st.columns(2)
-if have_data and res:
+if have_data:
     with cols[0]:
         st.write(f"- **Dislivello − (m):** {int(res['dneg'])}")
         st.write(f"- **Tempo piano:** {int(res['t_dist']//60)}:{int(round(res['t_dist']%60)):02d}")
@@ -551,63 +550,49 @@ if have_data and res:
         st.write(f"- **Buchi GPX:** {'OK (0)' if holes==0 else f'ATTENZIONE ({holes})'}")
 else:
     with cols[0]:
-        st.write("- **Dislivello − (m):** -")
-        st.write("- **Tempo piano:** -")
-        st.write("- **Tempo salita:** -")
-        st.write("- **Tempo discesa:** -")
-        st.write("- **Calorie stimate:** -")
-        st.write("- **Piano (km):** - — **Salita (km):** - — **Discesa (km):** -")
-        st.write("- **Pend. media salita (%):** - — **discesa (%):** -")
+        st.write("- **Dislivello − (m):** —")
+        st.write("- **Tempo piano:** —")
+        st.write("- **Tempo salita:** —")
+        st.write("- **Tempo discesa:** —")
+        st.write("- **Calorie stimate:** —")
+        st.write("- **Piano (km):** — — **Salita (km):** — — **Discesa (km):** —")
+        st.write("- **Pend. media salita (%):** — — **discesa (%):** —")
     with cols[1]:
-        st.write("- **LCS ≥25% (m):** -")
-        st.write("- **Blocchi ripidi (≥100 m @ ≥25%):** -")
-        st.write("- **Surge (cambi ritmo)/km:** -")
-        st.write("- **Buchi GPX:** -")
+        st.write("- **LCS ≥25% (m):** —")
+        st.write("- **Blocchi ripidi (≥100 m @ ≥25%):** —")
+        st.write("- **Surge (cambi ritmo)/km:** —")
+        st.write("- **Buchi GPX:** —")
 
-# === Profilo altimetrico (asse Y dalla quota minima) ===
+# ================== Profilo altimetrico ==================
 st.subheader("Profilo altimetrico")
 
-if have_data and res:
-    x = res["profile_x_km"]
-    y = res["profile_y_m"][:]  # nessuna esagerazione
+plot_w = int(st.session_state.plot_w)
+plot_h = int(st.session_state.plot_h)
+
+if have_data:
+    x = res["profile_x_km"]; y = res["profile_y_m"]
     df = pd.DataFrame({"km": x, "ele": y})
 
-    # ticks a km interi
+    # tick a km interi
     km_ticks = list(range(0, int(math.ceil(res["tot_km"])) + 1))
 
-    # dominio Y: dalla quota minima, con un piccolo margine
-    y_min = float(np.min(y))
-    y_max = float(np.max(y))
-    pad   = max(30.0, (y_max - y_min) * 0.08)
-    y_dom = [y_min - pad, y_max + pad]
-
-    base_line = alt.Chart(df).mark_line().encode(
-        x=alt.X("km:Q",
-                axis=alt.Axis(title="Distanza (km)", values=km_ticks, labelPadding=6)),
-        y=alt.Y("ele:Q",
-                axis=alt.Axis(title="Quota (m)"),
-                scale=alt.Scale(domain=y_dom))
-    ).properties(width=plot_w, height=st.session_state.plot_h)
-
-    chart = base_line
-
-    # etichette km/tempo
+    # tempo cumulato per etichette (approssimazione coerente con i parametri di passo)
     step_km = RS_STEP_M/1000.0
     dt_steps=[0.0]
-    y_raw = res["profile_y_m"]
-    for i in range(1,len(y_raw)):
-        dz = y_raw[i]-y_raw[i-1]
+    for i in range(1,len(y)):
+        dz = y[i]-y[i-1]
         t_flat = base * step_km
         t_up   = up   * max(0.0, dz)/100.0
         t_down = down * max(0.0,-dz)/200.0
         dt_steps.append(t_flat+t_up+t_down)
     cum = np.cumsum(dt_steps)
 
-    ann=[]
+    # etichette per km interi
+    ann = []
     for k in km_ticks:
-        idx = int(np.argmin(np.abs(np.array(x) - k)))
-        yk  = float(df.loc[idx, "ele"])
-        t   = float(cum[idx])
+        idx = int(np.argmin(np.abs(df["km"].values - k)))
+        yk = float(df.loc[idx,"ele"])
+        t  = float(cum[idx])
         if show_daytime:
             base_dt = dt.datetime.combine(dt.date.today(), start_time)
             txt = (base_dt + dt.timedelta(minutes=t)).strftime("%H:%M")
@@ -618,61 +603,77 @@ if have_data and res:
         ann.append({"km": float(k), "ele": yk, "top": f"{k} km", "bot": txt})
     ann_df = pd.DataFrame(ann)
 
+    # dominio Y dalla quota minima (con margine)
+    y_min, y_max = float(df["ele"].min()), float(df["ele"].max())
+    pad = max(10.0, 0.05*(y_max - y_min))
+    y_domain = [y_min - pad, y_max + pad]
+
+    base_line = alt.Chart(df).mark_line().encode(
+        x=alt.X("km:Q", axis=alt.Axis(title="Distanza (km)", values=km_ticks, labelPadding=6)),
+        y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)"), scale=alt.Scale(domain=y_domain)),
+    ).properties(width=plot_w, height=plot_h)
+
     if show_labels:
-        text1 = alt.Chart(ann_df).mark_text(fontSize=12, dy=-14, fontWeight="bold").encode(
-            x="km:Q", y="ele:Q", text="top:N")
-        text2 = alt.Chart(ann_df).mark_text(fontSize=12, dy=12).encode(
-            x="km:Q", y="ele:Q", text="bot:N")
-        chart = alt.layer(base_line, text1, text2).resolve_scale(y='shared').properties(width=plot_w, height=st.session_state.plot_h)
+        text1 = alt.Chart(ann_df).mark_text(fontSize=12, dy=-14, fontWeight="bold").encode(x="km:Q", y="ele:Q", text="top:N")
+        text2 = alt.Chart(ann_df).mark_text(fontSize=12, dy=12).encode(x="km:Q", y="ele:Q", text="bot:N")
+        chart = alt.layer(base_line, text1, text2).resolve_scale(y='shared').properties(width=plot_w, height=plot_h)
+    else:
+        chart = base_line
 
     st.altair_chart(chart, use_container_width=False)
 
 else:
-    # placeholder: griglia vuota
-    x = [i for i in range(11)]
-    y = [0 for _ in x]
-    df = pd.DataFrame({"km": x, "ele": y})
+    # Placeholder: griglia vuota con assi coerenti
+    df = pd.DataFrame({"km": np.linspace(0, 10, 2), "ele": [1000, 1000]})
     km_ticks = list(range(0, 11))
-    # dominio fisso per avere una griglia “neutra”
-    placeholder = alt.Chart(df).mark_line().encode(
-        x=alt.X("km:Q", axis=alt.Axis(title="Distanza (km)", values=km_ticks, labelPadding=6)),
-        y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)"),
-                scale=alt.Scale(domain=[0,100]))
-    ).properties(width=plot_w, height=plot_h)
-    st.altair_chart(placeholder, use_container_width=False)
+    y_domain = [900, 1100]
 
-# === Tabella split per km ===
+    base_line = alt.Chart(df).mark_line(color="#1f77b4").encode(
+        x=alt.X("km:Q", axis=alt.Axis(title="Distanza (km)", values=km_ticks, labelPadding=6)),
+        y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)"), scale=alt.Scale(domain=y_domain)),
+    ).properties(width=plot_w, height=plot_h)
+
+    st.altair_chart(base_line, use_container_width=False)
+
+# ================== Split per km (parziale + cumulativo/ora) ==================
 st.subheader("Tempi / Orario ai diversi Km")
 
-if have_data and res:
+def _fmt_hhmm(mins: float) -> str:
+    hh = int(mins//60); mm = int(round(mins - hh*60))
+    if mm==60: hh+=1; mm=0
+    return f"{hh}:{mm:02d}"
+
+if have_data:
+    # km interi disponibili dai dati
+    km_ticks = list(range(1, int(math.ceil(res["tot_km"])) + 1))
+
+    # stessi cum dell'area precedente
+    x = res["profile_x_km"]; y = res["profile_y_m"]
     step_km = RS_STEP_M/1000.0
     dt_steps=[0.0]
-    y_raw = res["profile_y_m"]
-    for i in range(1,len(y_raw)):
-        dz = y_raw[i]-y_raw[i-1]
+    for i in range(1,len(y)):
+        dz = y[i]-y[i-1]
         t_flat = base * step_km
         t_up   = up   * max(0.0, dz)/100.0
         t_down = down * max(0.0,-dz)/200.0
         dt_steps.append(t_flat+t_up+t_down)
     cum = np.cumsum(dt_steps)
 
+    df = pd.DataFrame({"km": x, "ele": y})
     rows=[]
-    for k in range(1, int(math.ceil(res["tot_km"])) + 1):
-        idx_k   = int(np.argmin(np.abs(np.array(res["profile_x_km"]) - k)))
-        idx_km1 = int(np.argmin(np.abs(np.array(res["profile_x_km"]) - (k-1))))
-        t_cum = float(cum[idx_k]); t_prev = float(cum[idx_km1]); t_split = t_cum - t_prev
-        hh_s=int(t_split//60); mm_s=int(round(t_split-hh_s*60))
-        if mm_s==60: hh_s+=1; mm_s=0
-        split_txt=f"{hh_s}:{mm_s:02d}"
+    for k in km_ticks:
+        idx_k   = int(np.argmin(np.abs(df["km"].values - k)))
+        idx_km1 = int(np.argmin(np.abs(df["km"].values - (k-1))))
+        t_cum  = float(cum[idx_k]);  t_prev = float(cum[idx_km1])
+        t_split = t_cum - t_prev
+        split_txt = _fmt_hhmm(t_split)
         if show_daytime:
-            base_dt = dt.datetime.combine(dt.date.today(), start_time)
-            cum_txt = (base_dt + dt.timedelta(minutes=t_cum)).strftime("%H:%M")
+            base_dt  = dt.datetime.combine(dt.date.today(), start_time)
+            cum_txt  = (base_dt + dt.timedelta(minutes=t_cum)).strftime("%H:%M")
         else:
-            hh_c=int(t_cum//60); mm_c=int(round(t_cum-hh_c*60))
-            if mm_c==60: hh_c+=1; mm_c=0
-            cum_txt=f"{hh_c}:{mm_c:02d}"
+            cum_txt  = _fmt_hhmm(t_cum)
         rows.append({"Km": k, "Tempo parziale": split_txt, "Cumulativo": cum_txt})
+
     st.dataframe(pd.DataFrame(rows), use_container_width=True, height=360)
 else:
-    st.dataframe(pd.DataFrame(columns=["Km","Tempo parziale","Cumulativo"]),
-                 use_container_width=True, height=240)
+    st.dataframe(pd.DataFrame(columns=["Km","Tempo parziale","Cumulativo"]), use_container_width=True, height=200)
