@@ -432,6 +432,7 @@ expo   = st.sidebar.selectbox("Esposizione", EXPO_OPTIONS, index=EXPO_OPTIONS.in
 tech   = st.sidebar.selectbox("Tecnica", TECH_OPTIONS, index=TECH_OPTIONS.index(DEFAULTS["tech"]))
 loadkg = st.sidebar.number_input("Zaino extra (kg)", 0.0, 40.0, DEFAULTS["loadkg"], 1.0)
 
+
 # --- Uploader + calcolo con modalità placeholder ---
 uploaded   = st.file_uploader("Trascina qui il file GPX", type=["gpx"])
 have_data  = uploaded is not None
@@ -439,13 +440,13 @@ res, fi    = None, None
 
 if have_data:
     try:
-        data = uploaded.read()
+        # Unica riga per leggere i bytes:
+        data = uploaded.getvalue() if hasattr(uploaded, "getvalue") else uploaded.read()
         lat, lon, ele = parse_gpx_bytes(data)
         if len(ele) < 2:
             have_data = False
             st.warning("Il GPX non contiene quote utili. Mostro solo il layout.")
         else:
-            # calcoli reali
             res = compute_from_arrays(
                 lat, lon, ele,
                 base_min_per_km=base,
@@ -464,6 +465,24 @@ if have_data:
     except Exception as e:
         have_data = False
         st.warning(f"Impossibile calcolare: {e}. Mostro solo il layout.")
+
+if not have_data:
+    # Placeholder per mostrare layout/gauge/tabella anche senza GPX
+    res = {
+        "tot_km": 0.0, "dplus": 0.0, "dneg": 0.0,
+        "t_dist": 0.0, "t_up": 0.0, "t_down": 0.0, "t_total": 0.0,
+        "holes": 0,
+        "len_flat_km": 0.0, "len_up_km": 0.0, "len_down_km": 0.0,
+        "grade_up_pct": 0.0, "grade_down_pct": 0.0,
+        "cal_total": 0,
+        "asc_bins_m": [0,0,0,0,0], "desc_bins_m": [0,0,0,0,0],
+        "lcs25_m": 0, "blocks25_count": 0, "surge_idx_per_km": 0.0,
+        "avg_alt_m": None,
+        "profile_x_km": list(np.linspace(0, 10, 41)),
+        "profile_y_m": [0.0]*41,
+    }
+    fi = {"IF": 0.0, "cat": "—"}
+
 
 if not have_data:
     # placeholder per far vedere layout, gauge e tabella
@@ -492,7 +511,7 @@ c3.metric("Tempo totale", "-" if not have_data else f"{int(res['t_total']//60)}:
 
 # === Parse + calcolo identico al desktop ===
 try:
-    data = uploaded.read()
+    
     lat,lon,ele = parse_gpx_bytes(data)
     if len(ele) < 2:
         st.error("Il GPX non contiene quote utili.")
