@@ -558,6 +558,7 @@ with gcol:
     else:
         km_ticks_real = list(range(0, 11))
     km_ticks_plot = [k/comp for k in km_ticks_real]
+    km_ticks = km_ticks_real
 
     # etichette sui km
     ann = []
@@ -586,20 +587,25 @@ with gcol:
             ann.append({"km_plot": float(k)/comp, "ele": yk, "top": f"{k} km", "bot": txt})
     ann_df = pd.DataFrame(ann) if ann else pd.DataFrame(columns=["km_plot","ele","top","bot"])
 
-    # grafico
+ 
+        # grafico
     line = alt.Chart(df).mark_line().encode(
         x=alt.X(
             "km_plot:Q",
             axis=alt.Axis(
                 title="Distanza (km)",
                 values=km_ticks_plot,
-                labelExpr=f'format(datum*{comp:.6g}, ".0f")'  # mostra i km reali sull’asse
+                # << FIX: usare datum.value per calcolare l'etichetta reale (km)
+                labelExpr=f'datum.value==null ? "" : format(datum.value*{comp:.6g}, ".0f")'
             )
         ),
         y=alt.Y("ele:Q", axis=alt.Axis(title="Quota (m)")),
-    ).properties(height=360)
+    ).properties(
+        height=360,
+        padding={"left": 5, "right": 5, "top": 5, "bottom": 34}  # << FIX: più spazio in basso
+    )
 
-    if have_data and show_labels_graph and not ann_df.empty:
+    if have_data and show_labels and not ann_df.empty:  # << usa il nome corretto del flag
         text1 = alt.Chart(ann_df).mark_text(fontSize=12, dy=-14, fontWeight="bold").encode(
             x="km_plot:Q", y="ele:Q", text="top:N"
         )
@@ -614,22 +620,37 @@ with gcol:
 # === Tempi / Orario ai diversi Km (tabella) ===
 st.subheader("Tempi / Orario ai diversi Km")
 if have_data:
-    rows=[]
-    for k in range(1, len(km_ticks)):
-        idx_k   = int(np.argmin(np.abs(df["km"].values - k)))
-        idx_km1 = int(np.argmin(np.abs(df["km"].values - (k-1))))
-        t_cum = float(cum[idx_k]); t_prev = float(cum[idx_km1]); t_split = t_cum - t_prev
-        hh_s=int(t_split//60); mm_s=int(round(t_split-hh_s*60))
-        if mm_s==60: hh_s+=1; mm_s=0
-        split_txt=f"{hh_s}:{mm_s:02d}"
-        if show_daytime:
-            base_dt = dt.datetime.combine(dt.date.today(), start_time)
-            cum_txt = (base_dt + dt.timedelta(minutes=t_cum)).strftime("%H:%M")
-        else:
-            hh_c=int(t_cum//60); mm_c=int(round(t_cum-hh_c*60))
-            if mm_c==60: hh_c+=1; mm_c=0
-            cum_txt=f"{hh_c}:{mm_c:02d}"
-        rows.append({"Km": k, "Tempo parziale": split_txt, "Cumulativo": cum_txt})
+
+rows = []
+
+# Se hai già creato il DataFrame con due colonne ‘km_raw’ e ‘km_plot’, usiamo km_raw
+# altrimenti cadiamo sulla colonna ‘km’ (compatibilità con la versione precedente).
+km_col = "km_raw" if "km_raw" in df.columns else "km"
+
+for k in km_ticks[1:]:
+    idx_k   = int(np.argmin(np.abs(df[km_col].values - k)))
+    idx_km1 = int(np.argmin(np.abs(df[km_col].values - (k - 1))))
+
+    t_cum   = float(cum[idx_k])      # minuti cumulati al Km k
+    t_prev  = float(cum[idx_km1])    # minuti cumulati al Km k-1
+    t_split = t_cum - t_prev         # parziale tra k-1 e k
+
+    # formato “hh:mm” per lo split
+    hh_s = int(t_split // 60); mm_s = int(round(t_split - hh_s*60))
+    if mm_s == 60: hh_s += 1; mm_s = 0
+    split_txt = f"{hh_s}:{mm_s:02d}"
+
+    # cumulato: ora del giorno oppure tempo cumulato
+    if show_daytime:
+        base_dt = dt.datetime.combine(dt.date.today(), start_time)
+        cum_txt = (base_dt + dt.timedelta(minutes=t_cum)).strftime("%H:%M")
+    else:
+        hh_c = int(t_cum // 60); mm_c = int(round(t_cum - hh_c*60))
+        if mm_c == 60: hh_c += 1; mm_c = 0
+        cum_txt = f"{hh_c}:{mm_c:02d}"
+
+    rows.append({"Km": k, "Tempo parziale": split_txt, "Cumulativo": cum_txt})
+
     st.dataframe(pd.DataFrame(rows), use_container_width=True, height=360)
 else:
     # Tabella “vuota” con km 1..10 e celle senza valore
